@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Derot</string>
+    <string name="service_name">Derot Video Feed Blocker</string>
+    <string name="service_description">Monitors apps and blocks short-form video feeds to help you stay focused.</string>
+
+    <string name="status_enabled">Video feed blocking is active</string>
+    <string name="status_disabled">Video feed blocking is disabled</string>
+
+    <string name="btn_open_settings">Open Accessibility Settings</string>
+    <string name="instruction_text">To enable Derot, you need to grant accessibility permissions.\n\n1. Tap the button below\n2. Find \"Derot Video Feed Blocker\"\n3. Enable the service\n\nDerot will then run in the background and block short-form video feeds in apps like X, Instagram, TikTok, and others.</string>
+
+    <string name="notification_channel_name">Derot Service</string>
+    <string name="notification_channel_description">Shows when Derot is actively blocking video feeds</string>
+    <string name="notification_title">Derot Active</string>
+    <string name="notification_text">Blocking short-form video feeds</string>
+
+    <string name="blocked_notification_title">Feed Blocked</string>
+    <string name="blocked_notification_text">Blocked a video feed in %1$s</string>
+</resources>
