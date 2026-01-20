@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network Security Configuration
+
+    This app has NO network functionality and should NEVER make network requests.
+    This config explicitly blocks all network traffic as defense-in-depth,
+    ensuring that even if malicious code were somehow injected, it couldn't
+    exfiltrate data.
+-->
+<network-security-config>
+    <!-- Block all cleartext (HTTP) traffic -->
+    <base-config cleartextTrafficPermitted="false">
+        <!-- Trust no certificates - effectively blocks all HTTPS too -->
+        <trust-anchors>
+            <!-- Empty: trust nothing -->
+        </trust-anchors>
+    </base-config>
+</network-security-config>

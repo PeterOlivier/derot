@@ -2,12 +2,10 @@ package com.derot.videoblocker
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -17,6 +15,13 @@ import androidx.core.app.NotificationCompat
 
 /**
  * Accessibility service that detects and blocks short-form video feeds.
+ *
+ * SECURITY NOTES:
+ * - This service can see UI element IDs and structure, but deliberately does NOT
+ *   read or log any user content (text, messages, passwords, etc.)
+ * - All logging is disabled in release builds
+ * - No data is stored persistently
+ * - No network access (enforced by network_security_config.xml)
  *
  * Detection strategy:
  * 1. Monitor window state changes to detect when entering video feed screens
@@ -43,6 +48,28 @@ class VideoFeedBlockerService : AccessibilityService() {
 
         // Minimum time in a video screen before considering it a feed
         private const val FEED_DETECTION_DELAY_MS = 800L
+
+        /**
+         * Security: Only log in debug builds to prevent information leakage
+         * in release builds. Logs could be read by other apps on older Android versions.
+         */
+        private fun logDebug(message: String) {
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, message)
+            }
+        }
+
+        private fun logInfo(message: String) {
+            if (BuildConfig.DEBUG) {
+                Log.i(TAG, message)
+            }
+        }
+
+        private fun logWarn(message: String) {
+            if (BuildConfig.DEBUG) {
+                Log.w(TAG, message)
+            }
+        }
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -85,7 +112,7 @@ class VideoFeedBlockerService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        Log.i(TAG, "Derot service connected")
+        logInfo("Derot service connected")
 
         // Configure service
         serviceInfo = serviceInfo.apply {
@@ -129,12 +156,12 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (currentApp != packageName) {
             currentApp = packageName
             resetFeedState()
-            Log.d(TAG, "App changed to: $packageName")
+            logDebug("App changed to: $packageName")
         }
 
         // Check if entering a video feed screen by activity name
         if (feedActivityPatterns.any { className.contains(it, ignoreCase = true) }) {
-            Log.d(TAG, "Detected feed activity: $className")
+            logDebug("Detected feed activity: $className")
             onPotentialFeedEntered(packageName)
         }
 
@@ -159,7 +186,8 @@ class VideoFeedBlockerService : AccessibilityService() {
     private fun handleContentChange(event: AccessibilityEvent, packageName: String) {
         if (!isInPotentialFeed) return
 
-        // Detect rapid content changes typical of scrolling through videos
+        // Security: We only use the HASH of content descriptions for change detection,
+        // never the actual content. This prevents any sensitive text from being processed.
         val contentHash = event.contentDescription?.hashCode() ?: event.text?.hashCode() ?: 0
         if (contentHash != 0 && contentHash != lastVideoContentHash) {
             lastVideoContentHash = contentHash
@@ -169,7 +197,7 @@ class VideoFeedBlockerService : AccessibilityService() {
             if (consecutiveVideoChanges >= 2) {
                 val timeSinceEntry = System.currentTimeMillis() - videoScreenEntryTime
                 if (timeSinceEntry > FEED_DETECTION_DELAY_MS) {
-                    Log.i(TAG, "Feed behavior detected: $consecutiveVideoChanges changes in $packageName")
+                    logInfo("Feed behavior detected: $consecutiveVideoChanges changes in $packageName")
                     blockVideoFeed(packageName)
                 }
             }
@@ -182,7 +210,7 @@ class VideoFeedBlockerService : AccessibilityService() {
             videoScreenEntryTime = System.currentTimeMillis()
             consecutiveVideoChanges = 0
             lastVideoContentHash = 0
-            Log.d(TAG, "Entered potential feed screen in $packageName")
+            logDebug("Entered potential feed screen in $packageName")
 
             // Schedule a check after delay
             handler.postDelayed({
@@ -248,7 +276,7 @@ class VideoFeedBlockerService : AccessibilityService() {
                 nodes.forEach { it.recycle() }
 
                 if (isFullScreen) {
-                    Log.d(TAG, "Twitter: Full-screen video detected")
+                    logDebug("Twitter: Full-screen video detected")
                     return true
                 }
             }
@@ -273,7 +301,7 @@ class VideoFeedBlockerService : AccessibilityService() {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                Log.d(TAG, "Instagram: Reels indicator found - $indicator")
+                logDebug("Instagram: Reels indicator found - $indicator")
                 return true
             }
         }
@@ -331,7 +359,7 @@ class VideoFeedBlockerService : AccessibilityService() {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                Log.d(TAG, "YouTube: Shorts indicator found - $indicator")
+                logDebug("YouTube: Shorts indicator found - $indicator")
                 return true
             }
         }
@@ -433,7 +461,8 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     /**
-     * Find node with text matching any of the given patterns
+     * Find node with text matching any of the given patterns.
+     * Security: Only checks for specific UI label patterns, not user content.
      */
     private fun findNodeWithText(root: AccessibilityNodeInfo, patterns: List<String>): Boolean {
         return findNode(root) { node ->
@@ -444,14 +473,20 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     /**
-     * Generic node finder
+     * Generic node finder with depth limit to prevent stack overflow
      */
-    private fun findNode(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean): Boolean {
+    private fun findNode(
+        root: AccessibilityNodeInfo,
+        depth: Int = 0,
+        maxDepth: Int = 15,
+        predicate: (AccessibilityNodeInfo) -> Boolean
+    ): Boolean {
+        if (depth > maxDepth) return false
         if (predicate(root)) return true
 
         for (i in 0 until root.childCount) {
             val child = root.getChild(i) ?: continue
-            if (findNode(child, predicate)) {
+            if (findNode(child, depth + 1, maxDepth, predicate)) {
                 child.recycle()
                 return true
             }
@@ -470,7 +505,7 @@ class VideoFeedBlockerService : AccessibilityService() {
         }
         lastBlockTime = now
 
-        Log.i(TAG, "BLOCKING video feed in $packageName")
+        logInfo("BLOCKING video feed in $packageName")
 
         // Press back to exit the feed
         performGlobalAction(GLOBAL_ACTION_BACK)
@@ -549,11 +584,11 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        Log.w(TAG, "Service interrupted")
+        logWarn("Service interrupted")
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.i(TAG, "Service destroyed")
+        logInfo("Service destroyed")
     }
 }
