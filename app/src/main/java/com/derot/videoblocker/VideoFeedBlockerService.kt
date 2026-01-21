@@ -61,6 +61,7 @@ class VideoFeedBlockerService : AccessibilityService() {
     private var currentApp = ""
     private var lastViewIdDumpTime = 0L
     private val dumpedApps = mutableSetOf<String>()
+    private var twitterNullCount = 0
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -98,7 +99,26 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     private fun checkAndBlockVideoFeed(packageName: String) {
-        val rootNode = rootInActiveWindow ?: return
+        val rootNode = rootInActiveWindow
+
+        // Debug: log when we can't get the root node for target apps
+        if (rootNode == null) {
+            if (packageName == "com.twitter.android") {
+                twitterNullCount++
+                if (twitterNullCount <= 5 || twitterNullCount % 50 == 0) {
+                    logDebug("Twitter: rootInActiveWindow is NULL (count: $twitterNullCount)")
+                }
+            }
+            return
+        }
+
+        // Reset null counter when we get a valid root
+        if (packageName == "com.twitter.android") {
+            if (twitterNullCount > 0) {
+                logDebug("Twitter: Got valid rootNode after $twitterNullCount nulls")
+            }
+            twitterNullCount = 0
+        }
 
         try {
             // Debug: dump view IDs for target apps
