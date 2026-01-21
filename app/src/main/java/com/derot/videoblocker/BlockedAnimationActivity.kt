@@ -19,7 +19,7 @@ import androidx.core.content.ContextCompat
 class BlockedAnimationActivity : Activity() {
 
     companion object {
-        const val ANIMATION_DURATION_MS = 800L
+        const val ANIMATION_DURATION_MS = 2000L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

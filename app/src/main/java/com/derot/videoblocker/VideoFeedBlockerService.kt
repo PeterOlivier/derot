@@ -77,7 +77,8 @@ class VideoFeedBlockerService : AccessibilityService() {
     // Track when user first enters a video feed (allow first video, block subsequent)
     private val videoFeedEntryTime = mutableMapOf<String, Long>()
     private val videoFeedContentHash = mutableMapOf<String, Int>()
-    private val FIRST_VIDEO_GRACE_PERIOD_MS = 500L // Time to detect if they swiped
+    private val videoFeedHashStableTime = mutableMapOf<String, Long>()
+    private val FIRST_VIDEO_GRACE_PERIOD_MS = 2000L // Wait 2 seconds for video to load before tracking swipes
 
     // Apps known for short-form video feeds
     private val videoFeedApps = setOf(
@@ -92,13 +93,28 @@ class VideoFeedBlockerService : AccessibilityService() {
         "com.snapchat.android"
     )
 
+    // Scroll-based detection for apps that block accessibility tree
+    private val scrollCountByApp = mutableMapOf<String, Int>()
+    private val scrollWindowStart = mutableMapOf<String, Long>()
+    private val SCROLL_WINDOW_MS = 30000L // 30 second window
+    private val SCROLL_THRESHOLD_FOR_FEED = 3 // 3+ scrolls = likely browsing feed
+    private var lastScrollTime = 0L
+    private val SCROLL_DEBOUNCE_MS = 500L // Debounce rapid scroll events
+
+    // Time-in-app tracking for fallback detection
+    private val appEntryTime = mutableMapOf<String, Long>()
+    private val TIME_IN_APP_WARNING_MS = 120000L // 2 minutes = warning
+    private var lastTimeWarning = 0L
+    private val TIME_WARNING_COOLDOWN_MS = 60000L // Don't warn more than once per minute
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         logInfo("Derot service connected")
 
         serviceInfo = serviceInfo.apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                    AccessibilityEvent.TYPE_VIEW_SCROLLED  // Track scrolls for Twitter
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                     AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
@@ -114,10 +130,30 @@ class VideoFeedBlockerService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
         if (isSystemPackage(packageName)) return
 
-        // Track app changes
+        // Track app changes and time spent
         if (currentApp != packageName) {
+            val previousApp = currentApp
             currentApp = packageName
             logDebug("App changed to: $packageName")
+
+            // Reset scroll tracking when leaving an app
+            scrollCountByApp.remove(previousApp)
+            scrollWindowStart.remove(previousApp)
+
+            // Track app entry time for video feed apps
+            if (packageName in videoFeedApps) {
+                appEntryTime[packageName] = System.currentTimeMillis()
+            }
+        }
+
+        // Check time in app for Twitter (fallback detection)
+        if (packageName == "com.twitter.android" || packageName == "com.twitter.android.lite") {
+            checkTimeInTwitter(packageName)
+        }
+
+        // Handle scroll events (for Twitter which blocks accessibility tree)
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            handleScrollEvent(event, packageName)
         }
 
         // Check for video feeds on any window change
@@ -130,6 +166,93 @@ class VideoFeedBlockerService : AccessibilityService() {
             }
 
             checkAndBlockVideoFeed(packageName)
+        }
+    }
+
+    /**
+     * Track scroll events for apps that block accessibility tree (like Twitter).
+     * If user scrolls many times in a short period, they're likely browsing a feed.
+     */
+    private fun handleScrollEvent(event: AccessibilityEvent, packageName: String) {
+        // Only track scrolls for Twitter (which blocks accessibility)
+        if (packageName != "com.twitter.android" && packageName != "com.twitter.android.lite") {
+            return
+        }
+
+        val now = System.currentTimeMillis()
+
+        // Debounce - don't count rapid-fire scroll events
+        if (now - lastScrollTime < SCROLL_DEBOUNCE_MS) {
+            return
+        }
+        lastScrollTime = now
+
+        // Check if this looks like a vertical scroll (feed browsing)
+        val scrollY = event.scrollY
+        val isVerticalScroll = event.scrollDeltaY != 0 || scrollY > 0
+
+        // Debug: log scroll events from Twitter
+        if (!dumpedApps.contains("scroll_debug_$packageName")) {
+            dumpedApps.add("scroll_debug_$packageName")
+            logInfo("=== TWITTER SCROLL EVENT ===")
+            logInfo("  scrollX=${event.scrollX}, scrollY=$scrollY")
+            logInfo("  scrollDeltaX=${event.scrollDeltaX}, scrollDeltaY=${event.scrollDeltaY}")
+            logInfo("  fromIndex=${event.fromIndex}, toIndex=${event.toIndex}")
+            logInfo("  className=${event.className}")
+        }
+
+        // Only count what looks like vertical feed scrolls
+        if (!isVerticalScroll) {
+            return
+        }
+
+        // Track scroll count within time window
+        val windowStart = scrollWindowStart[packageName] ?: now
+        if (now - windowStart > SCROLL_WINDOW_MS) {
+            // Window expired, reset
+            scrollCountByApp[packageName] = 1
+            scrollWindowStart[packageName] = now
+            logDebug("Twitter: Scroll window reset, count=1")
+        } else {
+            val count = (scrollCountByApp[packageName] ?: 0) + 1
+            scrollCountByApp[packageName] = count
+            logDebug("Twitter: Scroll count=$count (threshold=$SCROLL_THRESHOLD_FOR_FEED)")
+
+            // Threshold reached - user is scrolling through feed
+            if (count >= SCROLL_THRESHOLD_FOR_FEED) {
+                logInfo("Twitter: Detected feed browsing via scroll count ($count scrolls)")
+                blockVideoFeed(packageName)
+
+                // Reset tracking after blocking
+                scrollCountByApp.remove(packageName)
+                scrollWindowStart.remove(packageName)
+            }
+        }
+    }
+
+    /**
+     * Time-based detection for Twitter - warn after extended use.
+     * This is a fallback when scroll detection doesn't work.
+     */
+    private fun checkTimeInTwitter(packageName: String) {
+        val now = System.currentTimeMillis()
+        val entryTime = appEntryTime[packageName] ?: return
+        val timeInApp = now - entryTime
+
+        // Don't warn too frequently
+        if (now - lastTimeWarning < TIME_WARNING_COOLDOWN_MS) {
+            return
+        }
+
+        // After 2 minutes in Twitter, block (likely scrolling feed)
+        if (timeInApp >= TIME_IN_APP_WARNING_MS) {
+            logInfo("Twitter: Time-based detection triggered (${timeInApp / 1000}s in app)")
+            lastTimeWarning = now
+
+            // Reset entry time so we don't immediately re-trigger
+            appEntryTime[packageName] = now
+
+            blockVideoFeed(packageName)
         }
     }
 
@@ -307,10 +430,10 @@ class VideoFeedBlockerService : AccessibilityService() {
             // Left the reels viewer - reset tracking
             videoFeedEntryTime.remove("instagram")
             videoFeedContentHash.remove("instagram")
+            videoFeedHashStableTime.remove("instagram")
             return false
         }
 
-        // Get a hash of current content to detect swipes
         val contentHash = getContentHash(root)
         val now = System.currentTimeMillis()
 
@@ -318,11 +441,21 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!videoFeedEntryTime.containsKey("instagram")) {
             videoFeedEntryTime["instagram"] = now
             videoFeedContentHash["instagram"] = contentHash
-            logDebug("Instagram: Entered Reels - allowing first video")
+            videoFeedHashStableTime["instagram"] = now
+            logDebug("Instagram: Entered Reels - allowing first video (grace period started)")
             return false // Allow the first video
         }
 
-        // Content changed = user swiped to next video
+        val entryTime = videoFeedEntryTime["instagram"] ?: now
+
+        // Still in grace period? Update the "stable" hash but don't block
+        if (now - entryTime < FIRST_VIDEO_GRACE_PERIOD_MS) {
+            videoFeedContentHash["instagram"] = contentHash
+            videoFeedHashStableTime["instagram"] = now
+            return false // Still loading, don't block
+        }
+
+        // Grace period over - now check for swipes
         val previousHash = videoFeedContentHash["instagram"] ?: 0
         if (contentHash != previousHash && contentHash != 0) {
             logDebug("Instagram: Detected swipe to next video (hash: $previousHash -> $contentHash)")
@@ -356,10 +489,10 @@ class VideoFeedBlockerService : AccessibilityService() {
             // Left shorts - reset tracking
             videoFeedEntryTime.remove("youtube")
             videoFeedContentHash.remove("youtube")
+            videoFeedHashStableTime.remove("youtube")
             return false
         }
 
-        // Get a hash of current content to detect swipes
         val contentHash = getContentHash(root)
         val now = System.currentTimeMillis()
 
@@ -367,11 +500,21 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!videoFeedEntryTime.containsKey("youtube")) {
             videoFeedEntryTime["youtube"] = now
             videoFeedContentHash["youtube"] = contentHash
-            logDebug("YouTube: Entered Shorts - allowing first video")
+            videoFeedHashStableTime["youtube"] = now
+            logDebug("YouTube: Entered Shorts - allowing first video (grace period started)")
             return false // Allow the first video
         }
 
-        // Content changed = user swiped to next video
+        val entryTime = videoFeedEntryTime["youtube"] ?: now
+
+        // Still in grace period? Update the "stable" hash but don't block
+        if (now - entryTime < FIRST_VIDEO_GRACE_PERIOD_MS) {
+            videoFeedContentHash["youtube"] = contentHash
+            videoFeedHashStableTime["youtube"] = now
+            return false // Still loading, don't block
+        }
+
+        // Grace period over - now check for swipes
         val previousHash = videoFeedContentHash["youtube"] ?: 0
         if (contentHash != previousHash && contentHash != 0) {
             logDebug("YouTube: Detected swipe to next video (hash: $previousHash -> $contentHash)")
@@ -403,6 +546,7 @@ class VideoFeedBlockerService : AccessibilityService() {
                 nodes.forEach { it.recycle() }
                 videoFeedEntryTime.remove("tiktok")
                 videoFeedContentHash.remove("tiktok")
+                videoFeedHashStableTime.remove("tiktok")
                 return false
             }
         }
@@ -420,10 +564,10 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!inFeed) {
             videoFeedEntryTime.remove("tiktok")
             videoFeedContentHash.remove("tiktok")
+            videoFeedHashStableTime.remove("tiktok")
             return false
         }
 
-        // Get a hash of current content to detect swipes
         val contentHash = getContentHash(root)
         val now = System.currentTimeMillis()
 
@@ -431,15 +575,25 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!videoFeedEntryTime.containsKey("tiktok")) {
             videoFeedEntryTime["tiktok"] = now
             videoFeedContentHash["tiktok"] = contentHash
-            logDebug("TikTok: Entered feed - allowing first video")
-            return false // Allow the first video
+            videoFeedHashStableTime["tiktok"] = now
+            logDebug("TikTok: Entered feed - allowing first video (grace period started)")
+            return false
         }
 
-        // Content changed = user swiped to next video
+        val entryTime = videoFeedEntryTime["tiktok"] ?: now
+
+        // Still in grace period?
+        if (now - entryTime < FIRST_VIDEO_GRACE_PERIOD_MS) {
+            videoFeedContentHash["tiktok"] = contentHash
+            videoFeedHashStableTime["tiktok"] = now
+            return false
+        }
+
+        // Grace period over - check for swipes
         val previousHash = videoFeedContentHash["tiktok"] ?: 0
         if (contentHash != previousHash && contentHash != 0) {
             logDebug("TikTok: Detected swipe to next video (hash: $previousHash -> $contentHash)")
-            return true // Block!
+            return true
         }
 
         return false
@@ -468,6 +622,7 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!inReels) {
             videoFeedEntryTime.remove("facebook")
             videoFeedContentHash.remove("facebook")
+            videoFeedHashStableTime.remove("facebook")
             return false
         }
 
@@ -477,7 +632,16 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!videoFeedEntryTime.containsKey("facebook")) {
             videoFeedEntryTime["facebook"] = now
             videoFeedContentHash["facebook"] = contentHash
-            logDebug("Facebook: Entered Reels - allowing first video")
+            videoFeedHashStableTime["facebook"] = now
+            logDebug("Facebook: Entered Reels - allowing first video (grace period started)")
+            return false
+        }
+
+        val entryTime = videoFeedEntryTime["facebook"] ?: now
+
+        if (now - entryTime < FIRST_VIDEO_GRACE_PERIOD_MS) {
+            videoFeedContentHash["facebook"] = contentHash
+            videoFeedHashStableTime["facebook"] = now
             return false
         }
 
@@ -512,6 +676,7 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!inSpotlight) {
             videoFeedEntryTime.remove("snapchat")
             videoFeedContentHash.remove("snapchat")
+            videoFeedHashStableTime.remove("snapchat")
             return false
         }
 
@@ -521,7 +686,16 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!videoFeedEntryTime.containsKey("snapchat")) {
             videoFeedEntryTime["snapchat"] = now
             videoFeedContentHash["snapchat"] = contentHash
-            logDebug("Snapchat: Entered Spotlight - allowing first video")
+            videoFeedHashStableTime["snapchat"] = now
+            logDebug("Snapchat: Entered Spotlight - allowing first video (grace period started)")
+            return false
+        }
+
+        val entryTime = videoFeedEntryTime["snapchat"] ?: now
+
+        if (now - entryTime < FIRST_VIDEO_GRACE_PERIOD_MS) {
+            videoFeedContentHash["snapchat"] = contentHash
+            videoFeedHashStableTime["snapchat"] = now
             return false
         }
 
@@ -546,17 +720,17 @@ class VideoFeedBlockerService : AccessibilityService() {
         // Show the cute frog animation!
         showBlockAnimation()
 
-        // Press back AFTER animation finishes (animation is 800ms)
+        // Press back AFTER animation finishes (animation is 2000ms)
         // Press multiple times since some apps need more than one back press
         handler.postDelayed({
             performGlobalAction(GLOBAL_ACTION_BACK)
             logDebug("First back press")
-        }, 850)
+        }, 2050)
 
         handler.postDelayed({
             performGlobalAction(GLOBAL_ACTION_BACK)
             logDebug("Second back press")
-        }, 950)
+        }, 2150)
 
         showBlockedNotification(packageName)
     }
@@ -736,14 +910,14 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (activityName == null) return false
 
         val videoFeedActivityPatterns = listOf(
-            // Twitter/X
-            "immersive", "video", "media", "player", "reel",
+            // Twitter/X - specific video feed activities (NOT "main" which is the whole app)
+            "immersive", "video", "media", "player", "reel", "explore",
             // YouTube
-            "shorts", "reel",
+            "shorts",
             // Instagram
-            "clips", "reel",
+            "clips",
             // TikTok
-            "feed", "foryou", "main",
+            "foryou",
             // Generic
             "fullscreen", "vertical"
         )
