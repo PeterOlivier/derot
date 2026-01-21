@@ -16,15 +16,11 @@ import androidx.core.app.NotificationCompat
 /**
  * Accessibility service that detects and blocks short-form video feeds.
  *
- * IMPORTANT: This is designed to be CONSERVATIVE - it only blocks when we're
- * very confident the user is in an infinite video feed, not just watching
- * a single video.
- *
  * Detection strategy:
  * 1. Only monitor specific known apps (X, Instagram, YouTube, TikTok, etc.)
- * 2. Look for very specific UI elements that indicate a VIDEO FEED (not just any video)
- * 3. Only block after detecting a SWIPE to the next video (proves it's a feed)
- * 4. Never block on first video - let user watch what they clicked on
+ * 2. Look for very specific UI elements that indicate a VIDEO FEED
+ * 3. Block IMMEDIATELY when feed is detected - no free videos!
+ * 4. Show cute frog animation to let user know we saved them
  */
 class VideoFeedBlockerService : AccessibilityService() {
 
@@ -34,11 +30,8 @@ class VideoFeedBlockerService : AccessibilityService() {
         private const val NOTIFICATION_ID = 1
         private const val BLOCKED_NOTIFICATION_ID = 2
 
-        // Cooldown to prevent rapid back presses
+        // Cooldown to prevent rapid triggers
         private const val BLOCK_COOLDOWN_MS = 3000L
-
-        // How many video swipes before we block (2 = block on second video)
-        private const val SWIPES_BEFORE_BLOCK = 2
 
         private fun logDebug(message: String) {
             if (BuildConfig.DEBUG) {
@@ -62,9 +55,6 @@ class VideoFeedBlockerService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var lastBlockTime = 0L
     private var currentApp = ""
-    private var isInVideoFeed = false
-    private var videoSwipeCount = 0
-    private var lastVideoContentHash = 0
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -72,8 +62,7 @@ class VideoFeedBlockerService : AccessibilityService() {
 
         serviceInfo = serviceInfo.apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
-                    AccessibilityEvent.TYPE_VIEW_SCROLLED
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                     AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
@@ -89,27 +78,20 @@ class VideoFeedBlockerService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
         if (isSystemPackage(packageName)) return
 
-        // Track app changes - reset state when switching apps
+        // Track app changes
         if (currentApp != packageName) {
             currentApp = packageName
-            resetState()
             logDebug("App changed to: $packageName")
         }
 
-        when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                checkForVideoFeed(packageName)
-            }
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
-                if (isInVideoFeed) {
-                    detectVideoSwipe(event, packageName)
-                }
-            }
+        // Check for video feeds on any window change
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            checkAndBlockVideoFeed(packageName)
         }
     }
 
-    private fun checkForVideoFeed(packageName: String) {
+    private fun checkAndBlockVideoFeed(packageName: String) {
         val rootNode = rootInActiveWindow ?: return
 
         try {
@@ -126,49 +108,21 @@ class VideoFeedBlockerService : AccessibilityService() {
                     isInFacebookReels(rootNode)
                 "com.snapchat.android" ->
                     isInSnapchatSpotlight(rootNode)
-                else -> false  // Don't block unknown apps
+                else -> false
             }
 
-            if (inFeed && !isInVideoFeed) {
-                // Just entered a video feed
-                isInVideoFeed = true
-                videoSwipeCount = 1  // First video
-                lastVideoContentHash = 0
-                logDebug("Entered video feed in $packageName (watching first video)")
-            } else if (!inFeed && isInVideoFeed) {
-                // Left the video feed
-                resetState()
-                logDebug("Left video feed in $packageName")
+            if (inFeed) {
+                blockVideoFeed(packageName)
             }
         } finally {
             rootNode.recycle()
         }
     }
 
-    private fun detectVideoSwipe(event: AccessibilityEvent, packageName: String) {
-        // Detect content change that indicates swipe to next video
-        val contentHash = event.contentDescription?.hashCode()
-            ?: event.text?.toString()?.hashCode()
-            ?: return
-
-        if (contentHash != 0 && contentHash != lastVideoContentHash) {
-            lastVideoContentHash = contentHash
-            videoSwipeCount++
-            logDebug("Video swipe detected in $packageName (count: $videoSwipeCount)")
-
-            if (videoSwipeCount >= SWIPES_BEFORE_BLOCK) {
-                blockVideoFeed(packageName)
-            }
-        }
-    }
-
     /**
-     * Twitter/X: Only block when in the immersive full-screen video feed,
-     * NOT when watching a video in a tweet.
+     * Twitter/X: Block the immersive full-screen video feed
      */
     private fun isInTwitterVideoFeed(root: AccessibilityNodeInfo): Boolean {
-        // Look specifically for the immersive video viewer (the swipeable feed)
-        // This appears when you tap into a video and can swipe up/down for more
         val immersiveFeedIndicators = listOf(
             "com.twitter.android:id/immersive_player_container",
             "com.twitter.android:id/immersive_video_pager"
@@ -185,10 +139,9 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     /**
-     * Instagram: Only block when in Reels, not when viewing a video in feed/stories
+     * Instagram: Block Reels
      */
     private fun isInInstagramReels(root: AccessibilityNodeInfo): Boolean {
-        // These are specific to the Reels viewer
         val reelsIndicators = listOf(
             "com.instagram.android:id/clips_viewer_view_pager",
             "com.instagram.android:id/reel_viewer_view_pager"
@@ -206,10 +159,9 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     /**
-     * YouTube: Only block Shorts, not regular videos
+     * YouTube: Block Shorts
      */
     private fun isInYouTubeShorts(root: AccessibilityNodeInfo): Boolean {
-        // Specific to Shorts player
         val shortsIndicators = listOf(
             "com.google.android.youtube:id/reel_recycler",
             "com.google.android.youtube:id/reel_player_page_container",
@@ -228,16 +180,14 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     /**
-     * TikTok: Block the main For You feed, but allow profile browsing
+     * TikTok: Block the main For You feed
      */
     private fun isInTikTokFeed(root: AccessibilityNodeInfo): Boolean {
-        // Check if we're on the main feed (not profile, search, etc.)
         val feedIndicators = listOf(
-            "com.zhiliaoapp.musically:id/rl",  // Main feed container
+            "com.zhiliaoapp.musically:id/rl",
             "com.ss.android.ugc.trill:id/rl"
         )
 
-        // If these are visible, we're NOT in the feed
         val nonFeedIndicators = listOf(
             "com.zhiliaoapp.musically:id/profile_fragment",
             "com.zhiliaoapp.musically:id/search_bar",
@@ -263,7 +213,7 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     /**
-     * Facebook: Only block Reels, not regular video posts
+     * Facebook: Block Reels
      */
     private fun isInFacebookReels(root: AccessibilityNodeInfo): Boolean {
         val reelsIndicators = listOf(
@@ -283,7 +233,7 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     /**
-     * Snapchat: Only block Spotlight
+     * Snapchat: Block Spotlight
      */
     private fun isInSnapchatSpotlight(root: AccessibilityNodeInfo): Boolean {
         val spotlightIndicators = listOf(
@@ -308,17 +258,29 @@ class VideoFeedBlockerService : AccessibilityService() {
         }
         lastBlockTime = now
 
-        logInfo("BLOCKING video feed in $packageName after $videoSwipeCount videos")
+        logInfo("BLOCKING video feed in $packageName")
 
-        performGlobalAction(GLOBAL_ACTION_BACK)
-        resetState()
+        // Show the cute frog animation!
+        showBlockAnimation()
+
+        // Press back to exit the feed
+        handler.postDelayed({
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        }, 100)  // Small delay to let animation start
+
         showBlockedNotification(packageName)
     }
 
-    private fun resetState() {
-        isInVideoFeed = false
-        videoSwipeCount = 0
-        lastVideoContentHash = 0
+    private fun showBlockAnimation() {
+        try {
+            val intent = Intent(this, BlockedAnimationActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            logWarn("Could not show animation: ${e.message}")
+        }
     }
 
     private fun isSystemPackage(packageName: String): Boolean {
