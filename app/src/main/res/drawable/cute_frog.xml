@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cute frog holding a sign -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <!-- Sign post -->
+    <path
+        android:fillColor="#8B4513"
+        android:pathData="M23,28L25,28L25,44L23,44Z"/>
+
+    <!-- Sign board -->
+    <path
+        android:fillColor="#F5DEB3"
+        android:pathData="M10,12L38,12L38,28L10,28Z"/>
+    <path
+        android:fillColor="#DEB887"
+        android:strokeColor="#8B4513"
+        android:strokeWidth="1"
+        android:pathData="M10,12L38,12L38,28L10,28Z"/>
+
+    <!-- Frog body -->
+    <path
+        android:fillColor="#4CAF50"
+        android:pathData="M24,38 C30,38 34,34 34,30 C34,26 30,24 24,24 C18,24 14,26 14,30 C14,34 18,38 24,38Z"/>
+
+    <!-- Frog belly -->
+    <path
+        android:fillColor="#81C784"
+        android:pathData="M24,36 C28,36 30,34 30,31 C30,28 28,27 24,27 C20,27 18,28 18,31 C18,34 20,36 24,36Z"/>
+
+    <!-- Left eye white -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M18,26 C20,26 21,24 21,22 C21,20 20,19 18,19 C16,19 15,20 15,22 C15,24 16,26 18,26Z"/>
+
+    <!-- Right eye white -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,26 C32,26 33,24 33,22 C33,20 32,19 30,19 C28,19 27,20 27,22 C27,24 28,26 30,26Z"/>
+
+    <!-- Left pupil -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M18,24 C19,24 19.5,23 19.5,22 C19.5,21 19,20 18,20 C17,20 16.5,21 16.5,22 C16.5,23 17,24 18,24Z"/>
+
+    <!-- Right pupil -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M30,24 C31,24 31.5,23 31.5,22 C31.5,21 31,20 30,20 C29,20 28.5,21 28.5,22 C28.5,23 29,24 30,24Z"/>
+
+    <!-- Smile -->
+    <path
+        android:fillColor="#388E3C"
+        android:pathData="M20,33 Q24,36 28,33"/>
+
+    <!-- Blush left -->
+    <path
+        android:fillColor="#E91E63"
+        android:alpha="0.3"
+        android:pathData="M16,30 C17,30 17.5,29.5 17.5,29 C17.5,28.5 17,28 16,28 C15,28 14.5,28.5 14.5,29 C14.5,29.5 15,30 16,30Z"/>
+
+    <!-- Blush right -->
+    <path
+        android:fillColor="#E91E63"
+        android:alpha="0.3"
+        android:pathData="M32,30 C33,30 33.5,29.5 33.5,29 C33.5,28.5 33,28 32,28 C31,28 30.5,28.5 30.5,29 C30.5,29.5 31,30 32,30Z"/>
+
+    <!-- Left arm holding sign -->
+    <path
+        android:fillColor="#4CAF50"
+        android:pathData="M16,30 L12,26 L14,26 L17,29Z"/>
+
+    <!-- Right arm holding sign -->
+    <path
+        android:fillColor="#4CAF50"
+        android:pathData="M32,30 L36,26 L34,26 L31,29Z"/>
+
+</vector>
