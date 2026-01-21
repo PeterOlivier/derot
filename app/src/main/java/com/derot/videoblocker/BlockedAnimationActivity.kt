@@ -17,20 +17,20 @@ import kotlin.random.Random
 
 /**
  * Fun animation shown when blocking a video feed.
- * Shows 100+ cute frogs holding "stop rotting pleas" signs.
+ * Shows 100+ cute dogs holding "stop rotting pleas" signs.
  */
 class BlockedAnimationActivity : Activity() {
 
     companion object {
         const val ANIMATION_DURATION_MS = 800L
-        const val NUM_FROGS = 120
+        const val NUM_DOGS = 120
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         // Full screen animated view
-        setContentView(FrogAnimationView(this))
+        setContentView(DogAnimationView(this))
 
         // Auto-close after animation
         Handler(Looper.getMainLooper()).postDelayed({
@@ -44,12 +44,12 @@ class BlockedAnimationActivity : Activity() {
     }
 
     /**
-     * Custom view that draws 100+ bouncing frogs with signs
+     * Custom view that draws 100+ bouncing dogs with signs
      */
-    inner class FrogAnimationView(context: Context) : View(context) {
+    inner class DogAnimationView(context: Context) : View(context) {
 
-        private val frogs = mutableListOf<Frog>()
-        private val frogDrawable: Drawable? = ContextCompat.getDrawable(context, R.drawable.cute_frog)
+        private val dogs = mutableListOf<Dog>()
+        private val dogDrawable: Drawable? = ContextCompat.getDrawable(context, R.drawable.cute_dog)
         private val textPaint = Paint().apply {
             color = Color.WHITE
             textSize = 60f
@@ -64,13 +64,13 @@ class BlockedAnimationActivity : Activity() {
         private var animator: ValueAnimator? = null
 
         init {
-            // Generate random frogs
+            // Generate random dogs
             post {
-                for (i in 0 until NUM_FROGS) {
-                    frogs.add(Frog(
+                for (i in 0 until NUM_DOGS) {
+                    dogs.add(Dog(
                         x = Random.nextFloat() * width,
                         y = Random.nextFloat() * height,
-                        size = Random.nextInt(40, 80),
+                        size = Random.nextInt(60, 120),
                         speedX = Random.nextFloat() * 20 - 10,
                         speedY = Random.nextFloat() * 20 - 10,
                         rotation = Random.nextFloat() * 30 - 15
@@ -82,7 +82,7 @@ class BlockedAnimationActivity : Activity() {
                     duration = ANIMATION_DURATION_MS
                     interpolator = LinearInterpolator()
                     addUpdateListener {
-                        updateFrogs()
+                        updateDogs()
                         invalidate()
                     }
                     start()
@@ -90,11 +90,11 @@ class BlockedAnimationActivity : Activity() {
             }
         }
 
-        private fun updateFrogs() {
-            for (frog in frogs) {
-                frog.x += frog.speedX
-                frog.y += frog.speedY
-                frog.currentRotation += frog.rotation * 0.1f
+        private fun updateDogs() {
+            for (dog in dogs) {
+                dog.x += dog.speedX
+                dog.y += dog.speedY
+                dog.currentRotation += dog.rotation * 0.1f
             }
         }
 
@@ -104,13 +104,13 @@ class BlockedAnimationActivity : Activity() {
             // Dark background
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
 
-            // Draw all frogs
-            frogDrawable?.let { drawable ->
-                for (frog in frogs) {
+            // Draw all dogs
+            dogDrawable?.let { drawable ->
+                for (dog in dogs) {
                     canvas.save()
-                    canvas.translate(frog.x, frog.y)
-                    canvas.rotate(frog.currentRotation)
-                    drawable.setBounds(-frog.size/2, -frog.size/2, frog.size/2, frog.size/2)
+                    canvas.translate(dog.x, dog.y)
+                    canvas.rotate(dog.currentRotation)
+                    drawable.setBounds(-dog.size/2, -dog.size/2, dog.size/2, dog.size/2)
                     drawable.draw(canvas)
                     canvas.restore()
                 }
@@ -135,7 +135,7 @@ class BlockedAnimationActivity : Activity() {
         }
     }
 
-    data class Frog(
+    data class Dog(
         var x: Float,
         var y: Float,
         val size: Int,
