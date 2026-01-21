@@ -94,7 +94,78 @@ class VideoFeedBlockerService : AccessibilityService() {
         // Check for video feeds on any window change
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+
+            // Special handling for Twitter - try event-based detection first
+            if (packageName == "com.twitter.android" || packageName == "com.twitter.android.lite") {
+                checkTwitterVideoFeedFromEvent(event, packageName)
+            }
+
             checkAndBlockVideoFeed(packageName)
+        }
+    }
+
+    /**
+     * Twitter-specific detection using event data directly (when rootInActiveWindow is null)
+     */
+    private fun checkTwitterVideoFeedFromEvent(event: AccessibilityEvent, packageName: String) {
+        // Get class name from event
+        val className = event.className?.toString() ?: ""
+
+        // Get content description and text from event
+        val contentDesc = event.contentDescription?.toString() ?: ""
+        val text = event.text.joinToString(" ")
+
+        // Debug: log what we can see from Twitter
+        if (!dumpedApps.contains("twitter_event_debug")) {
+            dumpedApps.add("twitter_event_debug")
+            logInfo("=== TWITTER EVENT DEBUG ===")
+            logInfo("  className: $className")
+            logInfo("  contentDesc: $contentDesc")
+            logInfo("  text: $text")
+            logInfo("  eventType: ${event.eventType}")
+        }
+
+        // Try to get info from event source
+        val source = event.source
+        if (source != null) {
+            try {
+                if (!dumpedApps.contains("twitter_source_debug")) {
+                    dumpedApps.add("twitter_source_debug")
+                    logInfo("=== TWITTER SOURCE DEBUG ===")
+                    logInfo("  source.className: ${source.className}")
+                    logInfo("  source.viewIdResourceName: ${source.viewIdResourceName}")
+                    logInfo("  source.contentDescription: ${source.contentDescription}")
+                    logInfo("  source.text: ${source.text}")
+
+                    // Try to dump IDs from source's window
+                    val viewIds = mutableSetOf<String>()
+                    collectViewIds(source, viewIds, 0)
+                    logInfo("=== TWITTER SOURCE VIEW IDS ===")
+                    viewIds.sorted().forEach { viewId ->
+                        logInfo("  $viewId")
+                    }
+                    logInfo("=== END TWITTER SOURCE (${viewIds.size} total) ===")
+                }
+
+                // Check for video feed indicators in class names
+                val videoFeedClasses = listOf(
+                    "ImmersivePlayer",
+                    "VideoPlayer",
+                    "FullScreenVideo",
+                    "MediaViewer",
+                    "ViewPager"
+                )
+
+                for (indicator in videoFeedClasses) {
+                    if (className.contains(indicator, ignoreCase = true) ||
+                        source.className?.toString()?.contains(indicator, ignoreCase = true) == true) {
+                        logDebug("Twitter: Found video indicator class: $indicator")
+                        // Don't block yet - just log for now until we understand the patterns
+                    }
+                }
+            } finally {
+                source.recycle()
+            }
         }
     }
 
