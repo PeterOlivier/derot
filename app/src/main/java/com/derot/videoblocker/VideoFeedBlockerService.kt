@@ -77,7 +77,8 @@ class VideoFeedBlockerService : AccessibilityService() {
     // Track when user first enters a video feed (allow first video, block subsequent)
     private val videoFeedEntryTime = mutableMapOf<String, Long>()
     private val videoFeedContentHash = mutableMapOf<String, Int>()
-    private val FIRST_VIDEO_GRACE_PERIOD_MS = 500L // Time to detect if they swiped
+    private val videoFeedHashStableTime = mutableMapOf<String, Long>()
+    private val FIRST_VIDEO_GRACE_PERIOD_MS = 2000L // Wait 2 seconds for video to load before tracking swipes
 
     // Apps known for short-form video feeds
     private val videoFeedApps = setOf(
@@ -307,10 +308,10 @@ class VideoFeedBlockerService : AccessibilityService() {
             // Left the reels viewer - reset tracking
             videoFeedEntryTime.remove("instagram")
             videoFeedContentHash.remove("instagram")
+            videoFeedHashStableTime.remove("instagram")
             return false
         }
 
-        // Get a hash of current content to detect swipes
         val contentHash = getContentHash(root)
         val now = System.currentTimeMillis()
 
@@ -318,11 +319,21 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!videoFeedEntryTime.containsKey("instagram")) {
             videoFeedEntryTime["instagram"] = now
             videoFeedContentHash["instagram"] = contentHash
-            logDebug("Instagram: Entered Reels - allowing first video")
+            videoFeedHashStableTime["instagram"] = now
+            logDebug("Instagram: Entered Reels - allowing first video (grace period started)")
             return false // Allow the first video
         }
 
-        // Content changed = user swiped to next video
+        val entryTime = videoFeedEntryTime["instagram"] ?: now
+
+        // Still in grace period? Update the "stable" hash but don't block
+        if (now - entryTime < FIRST_VIDEO_GRACE_PERIOD_MS) {
+            videoFeedContentHash["instagram"] = contentHash
+            videoFeedHashStableTime["instagram"] = now
+            return false // Still loading, don't block
+        }
+
+        // Grace period over - now check for swipes
         val previousHash = videoFeedContentHash["instagram"] ?: 0
         if (contentHash != previousHash && contentHash != 0) {
             logDebug("Instagram: Detected swipe to next video (hash: $previousHash -> $contentHash)")
@@ -356,10 +367,10 @@ class VideoFeedBlockerService : AccessibilityService() {
             // Left shorts - reset tracking
             videoFeedEntryTime.remove("youtube")
             videoFeedContentHash.remove("youtube")
+            videoFeedHashStableTime.remove("youtube")
             return false
         }
 
-        // Get a hash of current content to detect swipes
         val contentHash = getContentHash(root)
         val now = System.currentTimeMillis()
 
@@ -367,11 +378,21 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!videoFeedEntryTime.containsKey("youtube")) {
             videoFeedEntryTime["youtube"] = now
             videoFeedContentHash["youtube"] = contentHash
-            logDebug("YouTube: Entered Shorts - allowing first video")
+            videoFeedHashStableTime["youtube"] = now
+            logDebug("YouTube: Entered Shorts - allowing first video (grace period started)")
             return false // Allow the first video
         }
 
-        // Content changed = user swiped to next video
+        val entryTime = videoFeedEntryTime["youtube"] ?: now
+
+        // Still in grace period? Update the "stable" hash but don't block
+        if (now - entryTime < FIRST_VIDEO_GRACE_PERIOD_MS) {
+            videoFeedContentHash["youtube"] = contentHash
+            videoFeedHashStableTime["youtube"] = now
+            return false // Still loading, don't block
+        }
+
+        // Grace period over - now check for swipes
         val previousHash = videoFeedContentHash["youtube"] ?: 0
         if (contentHash != previousHash && contentHash != 0) {
             logDebug("YouTube: Detected swipe to next video (hash: $previousHash -> $contentHash)")
@@ -403,6 +424,7 @@ class VideoFeedBlockerService : AccessibilityService() {
                 nodes.forEach { it.recycle() }
                 videoFeedEntryTime.remove("tiktok")
                 videoFeedContentHash.remove("tiktok")
+                videoFeedHashStableTime.remove("tiktok")
                 return false
             }
         }
@@ -420,10 +442,10 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!inFeed) {
             videoFeedEntryTime.remove("tiktok")
             videoFeedContentHash.remove("tiktok")
+            videoFeedHashStableTime.remove("tiktok")
             return false
         }
 
-        // Get a hash of current content to detect swipes
         val contentHash = getContentHash(root)
         val now = System.currentTimeMillis()
 
@@ -431,15 +453,25 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!videoFeedEntryTime.containsKey("tiktok")) {
             videoFeedEntryTime["tiktok"] = now
             videoFeedContentHash["tiktok"] = contentHash
-            logDebug("TikTok: Entered feed - allowing first video")
-            return false // Allow the first video
+            videoFeedHashStableTime["tiktok"] = now
+            logDebug("TikTok: Entered feed - allowing first video (grace period started)")
+            return false
         }
 
-        // Content changed = user swiped to next video
+        val entryTime = videoFeedEntryTime["tiktok"] ?: now
+
+        // Still in grace period?
+        if (now - entryTime < FIRST_VIDEO_GRACE_PERIOD_MS) {
+            videoFeedContentHash["tiktok"] = contentHash
+            videoFeedHashStableTime["tiktok"] = now
+            return false
+        }
+
+        // Grace period over - check for swipes
         val previousHash = videoFeedContentHash["tiktok"] ?: 0
         if (contentHash != previousHash && contentHash != 0) {
             logDebug("TikTok: Detected swipe to next video (hash: $previousHash -> $contentHash)")
-            return true // Block!
+            return true
         }
 
         return false
@@ -468,6 +500,7 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!inReels) {
             videoFeedEntryTime.remove("facebook")
             videoFeedContentHash.remove("facebook")
+            videoFeedHashStableTime.remove("facebook")
             return false
         }
 
@@ -477,7 +510,16 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!videoFeedEntryTime.containsKey("facebook")) {
             videoFeedEntryTime["facebook"] = now
             videoFeedContentHash["facebook"] = contentHash
-            logDebug("Facebook: Entered Reels - allowing first video")
+            videoFeedHashStableTime["facebook"] = now
+            logDebug("Facebook: Entered Reels - allowing first video (grace period started)")
+            return false
+        }
+
+        val entryTime = videoFeedEntryTime["facebook"] ?: now
+
+        if (now - entryTime < FIRST_VIDEO_GRACE_PERIOD_MS) {
+            videoFeedContentHash["facebook"] = contentHash
+            videoFeedHashStableTime["facebook"] = now
             return false
         }
 
@@ -512,6 +554,7 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!inSpotlight) {
             videoFeedEntryTime.remove("snapchat")
             videoFeedContentHash.remove("snapchat")
+            videoFeedHashStableTime.remove("snapchat")
             return false
         }
 
@@ -521,7 +564,16 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (!videoFeedEntryTime.containsKey("snapchat")) {
             videoFeedEntryTime["snapchat"] = now
             videoFeedContentHash["snapchat"] = contentHash
-            logDebug("Snapchat: Entered Spotlight - allowing first video")
+            videoFeedHashStableTime["snapchat"] = now
+            logDebug("Snapchat: Entered Spotlight - allowing first video (grace period started)")
+            return false
+        }
+
+        val entryTime = videoFeedEntryTime["snapchat"] ?: now
+
+        if (now - entryTime < FIRST_VIDEO_GRACE_PERIOD_MS) {
+            videoFeedContentHash["snapchat"] = contentHash
+            videoFeedHashStableTime["snapchat"] = now
             return false
         }
 
@@ -736,14 +788,14 @@ class VideoFeedBlockerService : AccessibilityService() {
         if (activityName == null) return false
 
         val videoFeedActivityPatterns = listOf(
-            // Twitter/X
-            "immersive", "video", "media", "player", "reel",
+            // Twitter/X - specific video feed activities (NOT "main" which is the whole app)
+            "immersive", "video", "media", "player", "reel", "explore",
             // YouTube
-            "shorts", "reel",
+            "shorts",
             // Instagram
-            "clips", "reel",
+            "clips",
             // TikTok
-            "feed", "foryou", "main",
+            "foryou",
             // Generic
             "fullscreen", "vertical"
         )
