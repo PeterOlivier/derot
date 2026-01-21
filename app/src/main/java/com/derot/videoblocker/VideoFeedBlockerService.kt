@@ -74,6 +74,11 @@ class VideoFeedBlockerService : AccessibilityService() {
     private var lastMediaCheckTime = 0L
     private val mediaCheckCooldown = 500L // Check media sessions every 500ms max
 
+    // Track when user first enters a video feed (allow first video, block subsequent)
+    private val videoFeedEntryTime = mutableMapOf<String, Long>()
+    private val videoFeedContentHash = mutableMapOf<String, Int>()
+    private val FIRST_VIDEO_GRACE_PERIOD_MS = 500L // Time to detect if they swiped
+
     // Apps known for short-form video feeds
     private val videoFeedApps = setOf(
         "com.twitter.android",
@@ -280,7 +285,7 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     /**
-     * Instagram: Block Reels
+     * Instagram: Block Reels - but allow the first video they clicked on
      */
     private fun isInInstagramReels(root: AccessibilityNodeInfo): Boolean {
         val reelsIndicators = listOf(
@@ -288,19 +293,47 @@ class VideoFeedBlockerService : AccessibilityService() {
             "com.instagram.android:id/reel_viewer_view_pager"
         )
 
+        var inReels = false
         for (indicator in reelsIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                logDebug("Instagram: In Reels viewer")
-                return true
+                inReels = true
+                break
             }
         }
+
+        if (!inReels) {
+            // Left the reels viewer - reset tracking
+            videoFeedEntryTime.remove("instagram")
+            videoFeedContentHash.remove("instagram")
+            return false
+        }
+
+        // Get a hash of current content to detect swipes
+        val contentHash = getContentHash(root)
+        val now = System.currentTimeMillis()
+
+        // First time entering reels?
+        if (!videoFeedEntryTime.containsKey("instagram")) {
+            videoFeedEntryTime["instagram"] = now
+            videoFeedContentHash["instagram"] = contentHash
+            logDebug("Instagram: Entered Reels - allowing first video")
+            return false // Allow the first video
+        }
+
+        // Content changed = user swiped to next video
+        val previousHash = videoFeedContentHash["instagram"] ?: 0
+        if (contentHash != previousHash && contentHash != 0) {
+            logDebug("Instagram: Detected swipe to next video (hash: $previousHash -> $contentHash)")
+            return true // Block!
+        }
+
         return false
     }
 
     /**
-     * YouTube: Block Shorts
+     * YouTube: Block Shorts - but allow the first video they clicked on
      */
     private fun isInYouTubeShorts(root: AccessibilityNodeInfo): Boolean {
         val shortsIndicators = listOf(
@@ -309,19 +342,47 @@ class VideoFeedBlockerService : AccessibilityService() {
             "com.google.android.youtube:id/shorts_player_container"
         )
 
+        var inShorts = false
         for (indicator in shortsIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                logDebug("YouTube: In Shorts")
-                return true
+                inShorts = true
+                break
             }
         }
+
+        if (!inShorts) {
+            // Left shorts - reset tracking
+            videoFeedEntryTime.remove("youtube")
+            videoFeedContentHash.remove("youtube")
+            return false
+        }
+
+        // Get a hash of current content to detect swipes
+        val contentHash = getContentHash(root)
+        val now = System.currentTimeMillis()
+
+        // First time entering shorts?
+        if (!videoFeedEntryTime.containsKey("youtube")) {
+            videoFeedEntryTime["youtube"] = now
+            videoFeedContentHash["youtube"] = contentHash
+            logDebug("YouTube: Entered Shorts - allowing first video")
+            return false // Allow the first video
+        }
+
+        // Content changed = user swiped to next video
+        val previousHash = videoFeedContentHash["youtube"] ?: 0
+        if (contentHash != previousHash && contentHash != 0) {
+            logDebug("YouTube: Detected swipe to next video (hash: $previousHash -> $contentHash)")
+            return true // Block!
+        }
+
         return false
     }
 
     /**
-     * TikTok: Block the main For You feed
+     * TikTok: Block the main For You feed - but allow the first video
      */
     private fun isInTikTokFeed(root: AccessibilityNodeInfo): Boolean {
         val feedIndicators = listOf(
@@ -335,26 +396,57 @@ class VideoFeedBlockerService : AccessibilityService() {
             "com.ss.android.ugc.trill:id/profile_fragment"
         )
 
+        // Check if we're NOT in a feed (profile, search, etc.)
         for (indicator in nonFeedIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
+                videoFeedEntryTime.remove("tiktok")
+                videoFeedContentHash.remove("tiktok")
                 return false
             }
         }
 
+        var inFeed = false
         for (indicator in feedIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                return true
+                inFeed = true
+                break
             }
         }
+
+        if (!inFeed) {
+            videoFeedEntryTime.remove("tiktok")
+            videoFeedContentHash.remove("tiktok")
+            return false
+        }
+
+        // Get a hash of current content to detect swipes
+        val contentHash = getContentHash(root)
+        val now = System.currentTimeMillis()
+
+        // First time entering feed?
+        if (!videoFeedEntryTime.containsKey("tiktok")) {
+            videoFeedEntryTime["tiktok"] = now
+            videoFeedContentHash["tiktok"] = contentHash
+            logDebug("TikTok: Entered feed - allowing first video")
+            return false // Allow the first video
+        }
+
+        // Content changed = user swiped to next video
+        val previousHash = videoFeedContentHash["tiktok"] ?: 0
+        if (contentHash != previousHash && contentHash != 0) {
+            logDebug("TikTok: Detected swipe to next video (hash: $previousHash -> $contentHash)")
+            return true // Block!
+        }
+
         return false
     }
 
     /**
-     * Facebook: Block Reels
+     * Facebook: Block Reels - but allow the first video
      */
     private fun isInFacebookReels(root: AccessibilityNodeInfo): Boolean {
         val reelsIndicators = listOf(
@@ -363,18 +455,43 @@ class VideoFeedBlockerService : AccessibilityService() {
             "com.facebook.lite:id/reels_viewer_fragment"
         )
 
+        var inReels = false
         for (indicator in reelsIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                return true
+                inReels = true
+                break
             }
         }
+
+        if (!inReels) {
+            videoFeedEntryTime.remove("facebook")
+            videoFeedContentHash.remove("facebook")
+            return false
+        }
+
+        val contentHash = getContentHash(root)
+        val now = System.currentTimeMillis()
+
+        if (!videoFeedEntryTime.containsKey("facebook")) {
+            videoFeedEntryTime["facebook"] = now
+            videoFeedContentHash["facebook"] = contentHash
+            logDebug("Facebook: Entered Reels - allowing first video")
+            return false
+        }
+
+        val previousHash = videoFeedContentHash["facebook"] ?: 0
+        if (contentHash != previousHash && contentHash != 0) {
+            logDebug("Facebook: Detected swipe to next video")
+            return true
+        }
+
         return false
     }
 
     /**
-     * Snapchat: Block Spotlight
+     * Snapchat: Block Spotlight - but allow the first video
      */
     private fun isInSnapchatSpotlight(root: AccessibilityNodeInfo): Boolean {
         val spotlightIndicators = listOf(
@@ -382,13 +499,38 @@ class VideoFeedBlockerService : AccessibilityService() {
             "com.snapchat.android:id/spotlight_viewer"
         )
 
+        var inSpotlight = false
         for (indicator in spotlightIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                return true
+                inSpotlight = true
+                break
             }
         }
+
+        if (!inSpotlight) {
+            videoFeedEntryTime.remove("snapchat")
+            videoFeedContentHash.remove("snapchat")
+            return false
+        }
+
+        val contentHash = getContentHash(root)
+        val now = System.currentTimeMillis()
+
+        if (!videoFeedEntryTime.containsKey("snapchat")) {
+            videoFeedEntryTime["snapchat"] = now
+            videoFeedContentHash["snapchat"] = contentHash
+            logDebug("Snapchat: Entered Spotlight - allowing first video")
+            return false
+        }
+
+        val previousHash = videoFeedContentHash["snapchat"] ?: 0
+        if (contentHash != previousHash && contentHash != 0) {
+            logDebug("Snapchat: Detected swipe to next video")
+            return true
+        }
+
         return false
     }
 
@@ -464,6 +606,30 @@ class VideoFeedBlockerService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             collectViewIds(child, ids, depth + 1)
+            child.recycle()
+        }
+    }
+
+    /**
+     * Get a hash of the current screen content to detect when user swipes to new video.
+     * Uses content descriptions and text which typically contain video titles, usernames, etc.
+     */
+    private fun getContentHash(root: AccessibilityNodeInfo): Int {
+        val contentBuilder = StringBuilder()
+        collectContentForHash(root, contentBuilder, 0)
+        return contentBuilder.toString().hashCode()
+    }
+
+    private fun collectContentForHash(node: AccessibilityNodeInfo, builder: StringBuilder, depth: Int) {
+        if (depth > 15) return // Don't go too deep
+
+        // Collect text and content descriptions (video titles, usernames, etc.)
+        node.text?.let { builder.append(it) }
+        node.contentDescription?.let { builder.append(it) }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectContentForHash(child, builder, depth + 1)
             child.recycle()
         }
     }
