@@ -33,6 +33,10 @@ class VideoFeedBlockerService : AccessibilityService() {
         // Cooldown to prevent rapid triggers
         private const val BLOCK_COOLDOWN_MS = 3000L
 
+        // Debug: dump view IDs once per app session
+        private const val DEBUG_DUMP_VIEW_IDS = true
+        private const val VIEW_ID_DUMP_COOLDOWN_MS = 5000L
+
         private fun logDebug(message: String) {
             if (BuildConfig.DEBUG) {
                 Log.d(TAG, message)
@@ -55,6 +59,8 @@ class VideoFeedBlockerService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var lastBlockTime = 0L
     private var currentApp = ""
+    private var lastViewIdDumpTime = 0L
+    private val dumpedApps = mutableSetOf<String>()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -95,6 +101,11 @@ class VideoFeedBlockerService : AccessibilityService() {
         val rootNode = rootInActiveWindow ?: return
 
         try {
+            // Debug: dump view IDs for target apps
+            if (packageName in listOf("com.twitter.android", "com.instagram.android")) {
+                dumpViewIds(rootNode, packageName)
+            }
+
             val inFeed = when (packageName) {
                 "com.twitter.android", "com.twitter.android.lite" ->
                     isInTwitterVideoFeed(rootNode)
@@ -263,10 +274,17 @@ class VideoFeedBlockerService : AccessibilityService() {
         // Show the cute frog animation!
         showBlockAnimation()
 
-        // Press back to exit the feed
+        // Press back AFTER animation finishes (animation is 800ms)
+        // Press multiple times since some apps need more than one back press
         handler.postDelayed({
             performGlobalAction(GLOBAL_ACTION_BACK)
-        }, 100)  // Small delay to let animation start
+            logDebug("First back press")
+        }, 850)
+
+        handler.postDelayed({
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            logDebug("Second back press")
+        }, 950)
 
         showBlockedNotification(packageName)
     }
@@ -280,6 +298,43 @@ class VideoFeedBlockerService : AccessibilityService() {
             startActivity(intent)
         } catch (e: Exception) {
             logWarn("Could not show animation: ${e.message}")
+        }
+    }
+
+    /**
+     * Debug: Dump all view IDs in the current screen to logcat
+     */
+    private fun dumpViewIds(root: AccessibilityNodeInfo, packageName: String) {
+        if (!DEBUG_DUMP_VIEW_IDS) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastViewIdDumpTime < VIEW_ID_DUMP_COOLDOWN_MS) return
+        if (dumpedApps.contains(packageName)) return
+
+        lastViewIdDumpTime = now
+        dumpedApps.add(packageName)
+
+        val viewIds = mutableSetOf<String>()
+        collectViewIds(root, viewIds, 0)
+
+        logInfo("=== VIEW IDS FOR $packageName ===")
+        viewIds.sorted().forEach { viewId ->
+            logInfo("  $viewId")
+        }
+        logInfo("=== END VIEW IDS (${viewIds.size} total) ===")
+    }
+
+    private fun collectViewIds(node: AccessibilityNodeInfo, ids: MutableSet<String>, depth: Int) {
+        if (depth > 30) return // Prevent infinite recursion
+
+        node.viewIdResourceName?.let { id ->
+            ids.add(id)
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectViewIds(child, ids, depth + 1)
+            child.recycle()
         }
     }
 
