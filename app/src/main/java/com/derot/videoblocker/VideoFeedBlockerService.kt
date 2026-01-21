@@ -93,13 +93,28 @@ class VideoFeedBlockerService : AccessibilityService() {
         "com.snapchat.android"
     )
 
+    // Scroll-based detection for apps that block accessibility tree
+    private val scrollCountByApp = mutableMapOf<String, Int>()
+    private val scrollWindowStart = mutableMapOf<String, Long>()
+    private val SCROLL_WINDOW_MS = 30000L // 30 second window
+    private val SCROLL_THRESHOLD_FOR_FEED = 3 // 3+ scrolls = likely browsing feed
+    private var lastScrollTime = 0L
+    private val SCROLL_DEBOUNCE_MS = 500L // Debounce rapid scroll events
+
+    // Time-in-app tracking for fallback detection
+    private val appEntryTime = mutableMapOf<String, Long>()
+    private val TIME_IN_APP_WARNING_MS = 120000L // 2 minutes = warning
+    private var lastTimeWarning = 0L
+    private val TIME_WARNING_COOLDOWN_MS = 60000L // Don't warn more than once per minute
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         logInfo("Derot service connected")
 
         serviceInfo = serviceInfo.apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                    AccessibilityEvent.TYPE_VIEW_SCROLLED  // Track scrolls for Twitter
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                     AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
@@ -115,10 +130,30 @@ class VideoFeedBlockerService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
         if (isSystemPackage(packageName)) return
 
-        // Track app changes
+        // Track app changes and time spent
         if (currentApp != packageName) {
+            val previousApp = currentApp
             currentApp = packageName
             logDebug("App changed to: $packageName")
+
+            // Reset scroll tracking when leaving an app
+            scrollCountByApp.remove(previousApp)
+            scrollWindowStart.remove(previousApp)
+
+            // Track app entry time for video feed apps
+            if (packageName in videoFeedApps) {
+                appEntryTime[packageName] = System.currentTimeMillis()
+            }
+        }
+
+        // Check time in app for Twitter (fallback detection)
+        if (packageName == "com.twitter.android" || packageName == "com.twitter.android.lite") {
+            checkTimeInTwitter(packageName)
+        }
+
+        // Handle scroll events (for Twitter which blocks accessibility tree)
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            handleScrollEvent(event, packageName)
         }
 
         // Check for video feeds on any window change
@@ -131,6 +166,93 @@ class VideoFeedBlockerService : AccessibilityService() {
             }
 
             checkAndBlockVideoFeed(packageName)
+        }
+    }
+
+    /**
+     * Track scroll events for apps that block accessibility tree (like Twitter).
+     * If user scrolls many times in a short period, they're likely browsing a feed.
+     */
+    private fun handleScrollEvent(event: AccessibilityEvent, packageName: String) {
+        // Only track scrolls for Twitter (which blocks accessibility)
+        if (packageName != "com.twitter.android" && packageName != "com.twitter.android.lite") {
+            return
+        }
+
+        val now = System.currentTimeMillis()
+
+        // Debounce - don't count rapid-fire scroll events
+        if (now - lastScrollTime < SCROLL_DEBOUNCE_MS) {
+            return
+        }
+        lastScrollTime = now
+
+        // Check if this looks like a vertical scroll (feed browsing)
+        val scrollY = event.scrollY
+        val isVerticalScroll = event.scrollDeltaY != 0 || scrollY > 0
+
+        // Debug: log scroll events from Twitter
+        if (!dumpedApps.contains("scroll_debug_$packageName")) {
+            dumpedApps.add("scroll_debug_$packageName")
+            logInfo("=== TWITTER SCROLL EVENT ===")
+            logInfo("  scrollX=${event.scrollX}, scrollY=$scrollY")
+            logInfo("  scrollDeltaX=${event.scrollDeltaX}, scrollDeltaY=${event.scrollDeltaY}")
+            logInfo("  fromIndex=${event.fromIndex}, toIndex=${event.toIndex}")
+            logInfo("  className=${event.className}")
+        }
+
+        // Only count what looks like vertical feed scrolls
+        if (!isVerticalScroll) {
+            return
+        }
+
+        // Track scroll count within time window
+        val windowStart = scrollWindowStart[packageName] ?: now
+        if (now - windowStart > SCROLL_WINDOW_MS) {
+            // Window expired, reset
+            scrollCountByApp[packageName] = 1
+            scrollWindowStart[packageName] = now
+            logDebug("Twitter: Scroll window reset, count=1")
+        } else {
+            val count = (scrollCountByApp[packageName] ?: 0) + 1
+            scrollCountByApp[packageName] = count
+            logDebug("Twitter: Scroll count=$count (threshold=$SCROLL_THRESHOLD_FOR_FEED)")
+
+            // Threshold reached - user is scrolling through feed
+            if (count >= SCROLL_THRESHOLD_FOR_FEED) {
+                logInfo("Twitter: Detected feed browsing via scroll count ($count scrolls)")
+                blockVideoFeed(packageName)
+
+                // Reset tracking after blocking
+                scrollCountByApp.remove(packageName)
+                scrollWindowStart.remove(packageName)
+            }
+        }
+    }
+
+    /**
+     * Time-based detection for Twitter - warn after extended use.
+     * This is a fallback when scroll detection doesn't work.
+     */
+    private fun checkTimeInTwitter(packageName: String) {
+        val now = System.currentTimeMillis()
+        val entryTime = appEntryTime[packageName] ?: return
+        val timeInApp = now - entryTime
+
+        // Don't warn too frequently
+        if (now - lastTimeWarning < TIME_WARNING_COOLDOWN_MS) {
+            return
+        }
+
+        // After 2 minutes in Twitter, block (likely scrolling feed)
+        if (timeInApp >= TIME_IN_APP_WARNING_MS) {
+            logInfo("Twitter: Time-based detection triggered (${timeInApp / 1000}s in app)")
+            lastTimeWarning = now
+
+            // Reset entry time so we don't immediately re-trigger
+            appEntryTime[packageName] = now
+
+            blockVideoFeed(packageName)
         }
     }
 
