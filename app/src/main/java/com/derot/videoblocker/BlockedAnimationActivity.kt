@@ -22,7 +22,7 @@ import kotlin.random.Random
 class BlockedAnimationActivity : Activity() {
 
     companion object {
-        const val ANIMATION_DURATION_MS = 400L
+        const val ANIMATION_DURATION_MS = 800L
         const val NUM_FROGS = 120
     }
 
