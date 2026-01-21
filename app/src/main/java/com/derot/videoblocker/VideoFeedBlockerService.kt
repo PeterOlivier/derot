@@ -5,7 +5,14 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -61,6 +68,29 @@ class VideoFeedBlockerService : AccessibilityService() {
     private var currentApp = ""
     private var lastViewIdDumpTime = 0L
     private val dumpedApps = mutableSetOf<String>()
+    private var twitterNullCount = 0
+    private var lastActivityCheckTime = 0L
+    private val activityCheckCooldown = 1000L // Check activity every 1 second max
+    private var lastMediaCheckTime = 0L
+    private val mediaCheckCooldown = 500L // Check media sessions every 500ms max
+
+    // Track when user first enters a video feed (allow first video, block subsequent)
+    private val videoFeedEntryTime = mutableMapOf<String, Long>()
+    private val videoFeedContentHash = mutableMapOf<String, Int>()
+    private val FIRST_VIDEO_GRACE_PERIOD_MS = 500L // Time to detect if they swiped
+
+    // Apps known for short-form video feeds
+    private val videoFeedApps = setOf(
+        "com.twitter.android",
+        "com.twitter.android.lite",
+        "com.instagram.android",
+        "com.google.android.youtube",
+        "com.zhiliaoapp.musically",
+        "com.ss.android.ugc.trill",
+        "com.facebook.katana",
+        "com.facebook.lite",
+        "com.snapchat.android"
+    )
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -93,12 +123,117 @@ class VideoFeedBlockerService : AccessibilityService() {
         // Check for video feeds on any window change
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+
+            // Special handling for Twitter - try event-based detection first
+            if (packageName == "com.twitter.android" || packageName == "com.twitter.android.lite") {
+                checkTwitterVideoFeedFromEvent(event, packageName)
+            }
+
             checkAndBlockVideoFeed(packageName)
         }
     }
 
+    /**
+     * Twitter-specific detection using event data directly (when rootInActiveWindow is null)
+     */
+    private fun checkTwitterVideoFeedFromEvent(event: AccessibilityEvent, packageName: String) {
+        // Get class name from event
+        val className = event.className?.toString() ?: ""
+
+        // Get content description and text from event
+        val contentDesc = event.contentDescription?.toString() ?: ""
+        val text = event.text.joinToString(" ")
+
+        // Debug: log what we can see from Twitter
+        if (!dumpedApps.contains("twitter_event_debug")) {
+            dumpedApps.add("twitter_event_debug")
+            logInfo("=== TWITTER EVENT DEBUG ===")
+            logInfo("  className: $className")
+            logInfo("  contentDesc: $contentDesc")
+            logInfo("  text: $text")
+            logInfo("  eventType: ${event.eventType}")
+        }
+
+        // METHOD 2: Check current activity via UsageStats (more reliable)
+        val activityName = getCurrentActivityName(packageName)
+        if (isVideoFeedActivity(activityName)) {
+            logInfo("Twitter: Video feed detected via UsageStats activity: $activityName")
+            blockVideoFeed(packageName)
+            return
+        }
+
+        // METHOD 3: Check if media is playing via MediaSession
+        if (checkMediaSessionPlaying(packageName)) {
+            logInfo("Twitter: Video detected via MediaSession playback")
+            // Don't auto-block just on media playing - could be regular video
+            // Just log for now to understand the patterns
+        }
+
+        // Try to get info from event source
+        val source = event.source
+        if (source != null) {
+            try {
+                if (!dumpedApps.contains("twitter_source_debug")) {
+                    dumpedApps.add("twitter_source_debug")
+                    logInfo("=== TWITTER SOURCE DEBUG ===")
+                    logInfo("  source.className: ${source.className}")
+                    logInfo("  source.viewIdResourceName: ${source.viewIdResourceName}")
+                    logInfo("  source.contentDescription: ${source.contentDescription}")
+                    logInfo("  source.text: ${source.text}")
+
+                    // Try to dump IDs from source's window
+                    val viewIds = mutableSetOf<String>()
+                    collectViewIds(source, viewIds, 0)
+                    logInfo("=== TWITTER SOURCE VIEW IDS ===")
+                    viewIds.sorted().forEach { viewId ->
+                        logInfo("  $viewId")
+                    }
+                    logInfo("=== END TWITTER SOURCE (${viewIds.size} total) ===")
+                }
+
+                // Check for video feed indicators in class names
+                val videoFeedClasses = listOf(
+                    "ImmersivePlayer",
+                    "VideoPlayer",
+                    "FullScreenVideo",
+                    "MediaViewer",
+                    "ViewPager"
+                )
+
+                for (indicator in videoFeedClasses) {
+                    if (className.contains(indicator, ignoreCase = true) ||
+                        source.className?.toString()?.contains(indicator, ignoreCase = true) == true) {
+                        logDebug("Twitter: Found video indicator class: $indicator")
+                        // Don't block yet - just log for now until we understand the patterns
+                    }
+                }
+            } finally {
+                source.recycle()
+            }
+        }
+    }
+
     private fun checkAndBlockVideoFeed(packageName: String) {
-        val rootNode = rootInActiveWindow ?: return
+        val rootNode = rootInActiveWindow
+
+        // Debug: log when we can't get the root node for target apps
+        if (rootNode == null) {
+            if (packageName == "com.twitter.android") {
+                twitterNullCount++
+                if (twitterNullCount <= 5 || twitterNullCount % 50 == 0) {
+                    logDebug("Twitter: rootInActiveWindow is NULL (count: $twitterNullCount)")
+                }
+            }
+            return
+        }
+
+        // Reset null counter when we get a valid root
+        if (packageName == "com.twitter.android") {
+            if (twitterNullCount > 0) {
+                logDebug("Twitter: Got valid rootNode after $twitterNullCount nulls")
+            }
+            twitterNullCount = 0
+        }
 
         try {
             // Debug: dump view IDs for target apps
@@ -150,7 +285,7 @@ class VideoFeedBlockerService : AccessibilityService() {
     }
 
     /**
-     * Instagram: Block Reels
+     * Instagram: Block Reels - but allow the first video they clicked on
      */
     private fun isInInstagramReels(root: AccessibilityNodeInfo): Boolean {
         val reelsIndicators = listOf(
@@ -158,19 +293,47 @@ class VideoFeedBlockerService : AccessibilityService() {
             "com.instagram.android:id/reel_viewer_view_pager"
         )
 
+        var inReels = false
         for (indicator in reelsIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                logDebug("Instagram: In Reels viewer")
-                return true
+                inReels = true
+                break
             }
         }
+
+        if (!inReels) {
+            // Left the reels viewer - reset tracking
+            videoFeedEntryTime.remove("instagram")
+            videoFeedContentHash.remove("instagram")
+            return false
+        }
+
+        // Get a hash of current content to detect swipes
+        val contentHash = getContentHash(root)
+        val now = System.currentTimeMillis()
+
+        // First time entering reels?
+        if (!videoFeedEntryTime.containsKey("instagram")) {
+            videoFeedEntryTime["instagram"] = now
+            videoFeedContentHash["instagram"] = contentHash
+            logDebug("Instagram: Entered Reels - allowing first video")
+            return false // Allow the first video
+        }
+
+        // Content changed = user swiped to next video
+        val previousHash = videoFeedContentHash["instagram"] ?: 0
+        if (contentHash != previousHash && contentHash != 0) {
+            logDebug("Instagram: Detected swipe to next video (hash: $previousHash -> $contentHash)")
+            return true // Block!
+        }
+
         return false
     }
 
     /**
-     * YouTube: Block Shorts
+     * YouTube: Block Shorts - but allow the first video they clicked on
      */
     private fun isInYouTubeShorts(root: AccessibilityNodeInfo): Boolean {
         val shortsIndicators = listOf(
@@ -179,19 +342,47 @@ class VideoFeedBlockerService : AccessibilityService() {
             "com.google.android.youtube:id/shorts_player_container"
         )
 
+        var inShorts = false
         for (indicator in shortsIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                logDebug("YouTube: In Shorts")
-                return true
+                inShorts = true
+                break
             }
         }
+
+        if (!inShorts) {
+            // Left shorts - reset tracking
+            videoFeedEntryTime.remove("youtube")
+            videoFeedContentHash.remove("youtube")
+            return false
+        }
+
+        // Get a hash of current content to detect swipes
+        val contentHash = getContentHash(root)
+        val now = System.currentTimeMillis()
+
+        // First time entering shorts?
+        if (!videoFeedEntryTime.containsKey("youtube")) {
+            videoFeedEntryTime["youtube"] = now
+            videoFeedContentHash["youtube"] = contentHash
+            logDebug("YouTube: Entered Shorts - allowing first video")
+            return false // Allow the first video
+        }
+
+        // Content changed = user swiped to next video
+        val previousHash = videoFeedContentHash["youtube"] ?: 0
+        if (contentHash != previousHash && contentHash != 0) {
+            logDebug("YouTube: Detected swipe to next video (hash: $previousHash -> $contentHash)")
+            return true // Block!
+        }
+
         return false
     }
 
     /**
-     * TikTok: Block the main For You feed
+     * TikTok: Block the main For You feed - but allow the first video
      */
     private fun isInTikTokFeed(root: AccessibilityNodeInfo): Boolean {
         val feedIndicators = listOf(
@@ -205,26 +396,57 @@ class VideoFeedBlockerService : AccessibilityService() {
             "com.ss.android.ugc.trill:id/profile_fragment"
         )
 
+        // Check if we're NOT in a feed (profile, search, etc.)
         for (indicator in nonFeedIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
+                videoFeedEntryTime.remove("tiktok")
+                videoFeedContentHash.remove("tiktok")
                 return false
             }
         }
 
+        var inFeed = false
         for (indicator in feedIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                return true
+                inFeed = true
+                break
             }
         }
+
+        if (!inFeed) {
+            videoFeedEntryTime.remove("tiktok")
+            videoFeedContentHash.remove("tiktok")
+            return false
+        }
+
+        // Get a hash of current content to detect swipes
+        val contentHash = getContentHash(root)
+        val now = System.currentTimeMillis()
+
+        // First time entering feed?
+        if (!videoFeedEntryTime.containsKey("tiktok")) {
+            videoFeedEntryTime["tiktok"] = now
+            videoFeedContentHash["tiktok"] = contentHash
+            logDebug("TikTok: Entered feed - allowing first video")
+            return false // Allow the first video
+        }
+
+        // Content changed = user swiped to next video
+        val previousHash = videoFeedContentHash["tiktok"] ?: 0
+        if (contentHash != previousHash && contentHash != 0) {
+            logDebug("TikTok: Detected swipe to next video (hash: $previousHash -> $contentHash)")
+            return true // Block!
+        }
+
         return false
     }
 
     /**
-     * Facebook: Block Reels
+     * Facebook: Block Reels - but allow the first video
      */
     private fun isInFacebookReels(root: AccessibilityNodeInfo): Boolean {
         val reelsIndicators = listOf(
@@ -233,18 +455,43 @@ class VideoFeedBlockerService : AccessibilityService() {
             "com.facebook.lite:id/reels_viewer_fragment"
         )
 
+        var inReels = false
         for (indicator in reelsIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                return true
+                inReels = true
+                break
             }
         }
+
+        if (!inReels) {
+            videoFeedEntryTime.remove("facebook")
+            videoFeedContentHash.remove("facebook")
+            return false
+        }
+
+        val contentHash = getContentHash(root)
+        val now = System.currentTimeMillis()
+
+        if (!videoFeedEntryTime.containsKey("facebook")) {
+            videoFeedEntryTime["facebook"] = now
+            videoFeedContentHash["facebook"] = contentHash
+            logDebug("Facebook: Entered Reels - allowing first video")
+            return false
+        }
+
+        val previousHash = videoFeedContentHash["facebook"] ?: 0
+        if (contentHash != previousHash && contentHash != 0) {
+            logDebug("Facebook: Detected swipe to next video")
+            return true
+        }
+
         return false
     }
 
     /**
-     * Snapchat: Block Spotlight
+     * Snapchat: Block Spotlight - but allow the first video
      */
     private fun isInSnapchatSpotlight(root: AccessibilityNodeInfo): Boolean {
         val spotlightIndicators = listOf(
@@ -252,13 +499,38 @@ class VideoFeedBlockerService : AccessibilityService() {
             "com.snapchat.android:id/spotlight_viewer"
         )
 
+        var inSpotlight = false
         for (indicator in spotlightIndicators) {
             val nodes = root.findAccessibilityNodeInfosByViewId(indicator)
             if (nodes.isNotEmpty()) {
                 nodes.forEach { it.recycle() }
-                return true
+                inSpotlight = true
+                break
             }
         }
+
+        if (!inSpotlight) {
+            videoFeedEntryTime.remove("snapchat")
+            videoFeedContentHash.remove("snapchat")
+            return false
+        }
+
+        val contentHash = getContentHash(root)
+        val now = System.currentTimeMillis()
+
+        if (!videoFeedEntryTime.containsKey("snapchat")) {
+            videoFeedEntryTime["snapchat"] = now
+            videoFeedContentHash["snapchat"] = contentHash
+            logDebug("Snapchat: Entered Spotlight - allowing first video")
+            return false
+        }
+
+        val previousHash = videoFeedContentHash["snapchat"] ?: 0
+        if (contentHash != previousHash && contentHash != 0) {
+            logDebug("Snapchat: Detected swipe to next video")
+            return true
+        }
+
         return false
     }
 
@@ -336,6 +608,154 @@ class VideoFeedBlockerService : AccessibilityService() {
             collectViewIds(child, ids, depth + 1)
             child.recycle()
         }
+    }
+
+    /**
+     * Get a hash of the current screen content to detect when user swipes to new video.
+     * Uses content descriptions and text which typically contain video titles, usernames, etc.
+     */
+    private fun getContentHash(root: AccessibilityNodeInfo): Int {
+        val contentBuilder = StringBuilder()
+        collectContentForHash(root, contentBuilder, 0)
+        return contentBuilder.toString().hashCode()
+    }
+
+    private fun collectContentForHash(node: AccessibilityNodeInfo, builder: StringBuilder, depth: Int) {
+        if (depth > 15) return // Don't go too deep
+
+        // Collect text and content descriptions (video titles, usernames, etc.)
+        node.text?.let { builder.append(it) }
+        node.contentDescription?.let { builder.append(it) }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectContentForHash(child, builder, depth + 1)
+            child.recycle()
+        }
+    }
+
+    /**
+     * Get current foreground activity name using UsageStats
+     * This is more resistant to apps blocking accessibility
+     */
+    private fun getCurrentActivityName(packageName: String): String? {
+        val now = System.currentTimeMillis()
+        if (now - lastActivityCheckTime < activityCheckCooldown) return null
+        lastActivityCheckTime = now
+
+        try {
+            val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+                ?: return null
+
+            val endTime = System.currentTimeMillis()
+            val beginTime = endTime - 5000 // Last 5 seconds
+
+            val usageEvents = usageStatsManager.queryEvents(beginTime, endTime)
+            var lastActivityName: String? = null
+
+            val event = UsageEvents.Event()
+            while (usageEvents.hasNextEvent()) {
+                usageEvents.getNextEvent(event)
+                if (event.packageName == packageName &&
+                    event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                    lastActivityName = event.className
+                }
+            }
+
+            if (lastActivityName != null && !dumpedApps.contains("activity_$packageName")) {
+                dumpedApps.add("activity_$packageName")
+                logInfo("=== FOREGROUND ACTIVITY for $packageName ===")
+                logInfo("  Activity: $lastActivityName")
+            }
+
+            return lastActivityName
+        } catch (e: Exception) {
+            logWarn("UsageStats error: ${e.message}")
+            return null
+        }
+    }
+
+    /**
+     * Check if a video feed app is currently playing media
+     * Uses MediaSessionManager to detect active playback
+     */
+    private fun checkMediaSessionPlaying(packageName: String): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - lastMediaCheckTime < mediaCheckCooldown) return false
+        lastMediaCheckTime = now
+
+        try {
+            val mediaSessionManager = getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
+                ?: return false
+
+            // Try to get active sessions (requires notification listener permission)
+            val activeSessions: List<MediaController>
+            try {
+                activeSessions = mediaSessionManager.getActiveSessions(
+                    ComponentName(this, MediaListenerService::class.java)
+                )
+            } catch (e: SecurityException) {
+                // No notification listener permission - user needs to enable it
+                logDebug("MediaSession: No permission - enable Notification Access for Derot")
+                return false
+            }
+
+            for (controller in activeSessions) {
+                val sessionPackage = controller.packageName
+                val playbackState = controller.playbackState
+
+                // Debug: log active media sessions from target apps
+                if (sessionPackage in videoFeedApps && !dumpedApps.contains("media_$sessionPackage")) {
+                    dumpedApps.add("media_$sessionPackage")
+                    logInfo("=== MEDIA SESSION for $sessionPackage ===")
+                    logInfo("  state: ${playbackState?.state}")
+                    logInfo("  metadata title: ${controller.metadata?.description?.title}")
+                    logInfo("  metadata subtitle: ${controller.metadata?.description?.subtitle}")
+                }
+
+                // Check if this is our target app and it's playing
+                if (sessionPackage == packageName) {
+                    val isPlaying = playbackState?.state == PlaybackState.STATE_PLAYING
+                    if (isPlaying) {
+                        logDebug("MediaSession: $packageName is playing media")
+                        return true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logWarn("MediaSession error: ${e.message}")
+        }
+
+        return false
+    }
+
+    /**
+     * Check if activity name indicates a video feed
+     */
+    private fun isVideoFeedActivity(activityName: String?): Boolean {
+        if (activityName == null) return false
+
+        val videoFeedActivityPatterns = listOf(
+            // Twitter/X
+            "immersive", "video", "media", "player", "reel",
+            // YouTube
+            "shorts", "reel",
+            // Instagram
+            "clips", "reel",
+            // TikTok
+            "feed", "foryou", "main",
+            // Generic
+            "fullscreen", "vertical"
+        )
+
+        val lowerActivity = activityName.lowercase()
+        for (pattern in videoFeedActivityPatterns) {
+            if (lowerActivity.contains(pattern)) {
+                logDebug("Activity matches video pattern '$pattern': $activityName")
+                return true
+            }
+        }
+        return false
     }
 
     private fun isSystemPackage(packageName: String): Boolean {
