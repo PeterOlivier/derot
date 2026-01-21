@@ -17,6 +17,10 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
+    <!-- Usage stats to detect foreground activities (more resistant to app blocking) -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher"

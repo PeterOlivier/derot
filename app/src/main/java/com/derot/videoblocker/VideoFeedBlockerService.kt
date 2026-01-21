@@ -5,6 +5,9 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
+import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
@@ -62,6 +65,8 @@ class VideoFeedBlockerService : AccessibilityService() {
     private var lastViewIdDumpTime = 0L
     private val dumpedApps = mutableSetOf<String>()
     private var twitterNullCount = 0
+    private var lastActivityCheckTime = 0L
+    private val activityCheckCooldown = 1000L // Check activity every 1 second max
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -123,6 +128,14 @@ class VideoFeedBlockerService : AccessibilityService() {
             logInfo("  contentDesc: $contentDesc")
             logInfo("  text: $text")
             logInfo("  eventType: ${event.eventType}")
+        }
+
+        // METHOD 2: Check current activity via UsageStats (more reliable)
+        val activityName = getCurrentActivityName(packageName)
+        if (isVideoFeedActivity(activityName)) {
+            logInfo("Twitter: Video feed detected via UsageStats activity: $activityName")
+            blockVideoFeed(packageName)
+            return
         }
 
         // Try to get info from event source
@@ -427,6 +440,76 @@ class VideoFeedBlockerService : AccessibilityService() {
             collectViewIds(child, ids, depth + 1)
             child.recycle()
         }
+    }
+
+    /**
+     * Get current foreground activity name using UsageStats
+     * This is more resistant to apps blocking accessibility
+     */
+    private fun getCurrentActivityName(packageName: String): String? {
+        val now = System.currentTimeMillis()
+        if (now - lastActivityCheckTime < activityCheckCooldown) return null
+        lastActivityCheckTime = now
+
+        try {
+            val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+                ?: return null
+
+            val endTime = System.currentTimeMillis()
+            val beginTime = endTime - 5000 // Last 5 seconds
+
+            val usageEvents = usageStatsManager.queryEvents(beginTime, endTime)
+            var lastActivityName: String? = null
+
+            val event = UsageEvents.Event()
+            while (usageEvents.hasNextEvent()) {
+                usageEvents.getNextEvent(event)
+                if (event.packageName == packageName &&
+                    event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                    lastActivityName = event.className
+                }
+            }
+
+            if (lastActivityName != null && !dumpedApps.contains("activity_$packageName")) {
+                dumpedApps.add("activity_$packageName")
+                logInfo("=== FOREGROUND ACTIVITY for $packageName ===")
+                logInfo("  Activity: $lastActivityName")
+            }
+
+            return lastActivityName
+        } catch (e: Exception) {
+            logWarn("UsageStats error: ${e.message}")
+            return null
+        }
+    }
+
+    /**
+     * Check if activity name indicates a video feed
+     */
+    private fun isVideoFeedActivity(activityName: String?): Boolean {
+        if (activityName == null) return false
+
+        val videoFeedActivityPatterns = listOf(
+            // Twitter/X
+            "immersive", "video", "media", "player", "reel",
+            // YouTube
+            "shorts", "reel",
+            // Instagram
+            "clips", "reel",
+            // TikTok
+            "feed", "foryou", "main",
+            // Generic
+            "fullscreen", "vertical"
+        )
+
+        val lowerActivity = activityName.lowercase()
+        for (pattern in videoFeedActivityPatterns) {
+            if (lowerActivity.contains(pattern)) {
+                logDebug("Activity matches video pattern '$pattern': $activityName")
+                return true
+            }
+        }
+        return false
     }
 
     private fun isSystemPackage(packageName: String): Boolean {

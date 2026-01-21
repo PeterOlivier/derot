@@ -1,9 +1,11 @@
 package com.derot.videoblocker
 
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.Process
 import android.provider.Settings
 import android.view.accessibility.AccessibilityManager
 import android.widget.Button
@@ -21,6 +23,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusIcon: ImageView
     private lateinit var statusText: TextView
     private lateinit var settingsButton: Button
+    private lateinit var usageButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -29,9 +32,14 @@ class MainActivity : AppCompatActivity() {
         statusIcon = findViewById(R.id.status_icon)
         statusText = findViewById(R.id.status_text)
         settingsButton = findViewById(R.id.btn_open_settings)
+        usageButton = findViewById(R.id.btn_usage_access)
 
         settingsButton.setOnClickListener {
             openAccessibilitySettings()
+        }
+
+        usageButton.setOnClickListener {
+            openUsageAccessSettings()
         }
 
         updateStatus()
@@ -43,14 +51,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateStatus() {
-        val isEnabled = isAccessibilityServiceEnabled()
+        val accessibilityEnabled = isAccessibilityServiceEnabled()
+        val usageAccessEnabled = isUsageAccessEnabled()
 
-        if (isEnabled) {
+        // Update accessibility button
+        if (accessibilityEnabled) {
             statusIcon.setImageResource(android.R.drawable.ic_media_play)
             statusIcon.setColorFilter(ContextCompat.getColor(this, R.color.secondary))
             statusText.text = getString(R.string.status_enabled)
             statusText.setTextColor(ContextCompat.getColor(this, R.color.secondary))
-            settingsButton.text = "Service is running - you can close this app"
+            settingsButton.text = "✓ Accessibility enabled"
             settingsButton.isEnabled = false
         } else {
             statusIcon.setImageResource(android.R.drawable.ic_media_pause)
@@ -60,6 +70,30 @@ class MainActivity : AppCompatActivity() {
             settingsButton.text = getString(R.string.btn_open_settings)
             settingsButton.isEnabled = true
         }
+
+        // Update usage access button
+        if (usageAccessEnabled) {
+            usageButton.text = "✓ Usage Access enabled (optional)"
+            usageButton.isEnabled = false
+        } else {
+            usageButton.text = "Grant Usage Access (for better X/Twitter detection)"
+            usageButton.isEnabled = true
+        }
+    }
+
+    private fun isUsageAccessEnabled(): Boolean {
+        val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val mode = appOps.checkOpNoThrow(
+            AppOpsManager.OPSTR_GET_USAGE_STATS,
+            Process.myUid(),
+            packageName
+        )
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun openUsageAccessSettings() {
+        val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+        startActivity(intent)
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
