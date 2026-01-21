@@ -7,8 +7,12 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -67,6 +71,21 @@ class VideoFeedBlockerService : AccessibilityService() {
     private var twitterNullCount = 0
     private var lastActivityCheckTime = 0L
     private val activityCheckCooldown = 1000L // Check activity every 1 second max
+    private var lastMediaCheckTime = 0L
+    private val mediaCheckCooldown = 500L // Check media sessions every 500ms max
+
+    // Apps known for short-form video feeds
+    private val videoFeedApps = setOf(
+        "com.twitter.android",
+        "com.twitter.android.lite",
+        "com.instagram.android",
+        "com.google.android.youtube",
+        "com.zhiliaoapp.musically",
+        "com.ss.android.ugc.trill",
+        "com.facebook.katana",
+        "com.facebook.lite",
+        "com.snapchat.android"
+    )
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -136,6 +155,13 @@ class VideoFeedBlockerService : AccessibilityService() {
             logInfo("Twitter: Video feed detected via UsageStats activity: $activityName")
             blockVideoFeed(packageName)
             return
+        }
+
+        // METHOD 3: Check if media is playing via MediaSession
+        if (checkMediaSessionPlaying(packageName)) {
+            logInfo("Twitter: Video detected via MediaSession playback")
+            // Don't auto-block just on media playing - could be regular video
+            // Just log for now to understand the patterns
         }
 
         // Try to get info from event source
@@ -481,6 +507,60 @@ class VideoFeedBlockerService : AccessibilityService() {
             logWarn("UsageStats error: ${e.message}")
             return null
         }
+    }
+
+    /**
+     * Check if a video feed app is currently playing media
+     * Uses MediaSessionManager to detect active playback
+     */
+    private fun checkMediaSessionPlaying(packageName: String): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - lastMediaCheckTime < mediaCheckCooldown) return false
+        lastMediaCheckTime = now
+
+        try {
+            val mediaSessionManager = getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
+                ?: return false
+
+            // Try to get active sessions (requires notification listener permission)
+            val activeSessions: List<MediaController>
+            try {
+                activeSessions = mediaSessionManager.getActiveSessions(
+                    ComponentName(this, MediaListenerService::class.java)
+                )
+            } catch (e: SecurityException) {
+                // No notification listener permission - user needs to enable it
+                logDebug("MediaSession: No permission - enable Notification Access for Derot")
+                return false
+            }
+
+            for (controller in activeSessions) {
+                val sessionPackage = controller.packageName
+                val playbackState = controller.playbackState
+
+                // Debug: log active media sessions from target apps
+                if (sessionPackage in videoFeedApps && !dumpedApps.contains("media_$sessionPackage")) {
+                    dumpedApps.add("media_$sessionPackage")
+                    logInfo("=== MEDIA SESSION for $sessionPackage ===")
+                    logInfo("  state: ${playbackState?.state}")
+                    logInfo("  metadata title: ${controller.metadata?.description?.title}")
+                    logInfo("  metadata subtitle: ${controller.metadata?.description?.subtitle}")
+                }
+
+                // Check if this is our target app and it's playing
+                if (sessionPackage == packageName) {
+                    val isPlaying = playbackState?.state == PlaybackState.STATE_PLAYING
+                    if (isPlaying) {
+                        logDebug("MediaSession: $packageName is playing media")
+                        return true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logWarn("MediaSession error: ${e.message}")
+        }
+
+        return false
     }
 
     /**
