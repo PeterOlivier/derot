@@ -720,17 +720,17 @@ class VideoFeedBlockerService : AccessibilityService() {
         // Show the cute frog animation!
         showBlockAnimation()
 
-        // Press back AFTER animation finishes (animation is 800ms)
+        // Press back AFTER animation finishes (animation is 2000ms)
         // Press multiple times since some apps need more than one back press
         handler.postDelayed({
             performGlobalAction(GLOBAL_ACTION_BACK)
             logDebug("First back press")
-        }, 850)
+        }, 2050)
 
         handler.postDelayed({
             performGlobalAction(GLOBAL_ACTION_BACK)
             logDebug("Second back press")
-        }, 950)
+        }, 2150)
 
         showBlockedNotification(packageName)
     }
