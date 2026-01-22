@@ -7,18 +7,28 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.SharedPreferences
+import android.media.AudioManager
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.core.app.NotificationCompat
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Accessibility service that detects and blocks short-form video feeds.
@@ -43,6 +53,10 @@ class VideoFeedBlockerService : AccessibilityService() {
         // Debug: dump view IDs once per app session
         private const val DEBUG_DUMP_VIEW_IDS = true
         private const val VIEW_ID_DUMP_COOLDOWN_MS = 5000L
+
+        // Broadcast actions for research mode
+        const val ACTION_TOGGLE_RESEARCH = "com.derot.videoblocker.TOGGLE_RESEARCH"
+        const val ACTION_RESEARCH_STATUS = "com.derot.videoblocker.RESEARCH_STATUS"
 
         private fun logDebug(message: String) {
             if (BuildConfig.DEBUG) {
@@ -107,6 +121,33 @@ class VideoFeedBlockerService : AccessibilityService() {
     private var lastTimeWarning = 0L
     private val TIME_WARNING_COOLDOWN_MS = 60000L // Don't warn more than once per minute
 
+    // ==================== RESEARCH MODE ====================
+    private var researchMode = false
+    private var researchOverlay: ResearchOverlay? = null
+    private var researchLogFile: File? = null
+    private val dateFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+
+    // MediaSession tracking for position resets
+    private var lastMediaPosition = 0L
+    private var lastMediaTitle = ""
+    private var mediaPositionResetCount = 0
+    private var lastMediaUpdateTime = 0L
+    private val POSITION_RESET_THRESHOLD_MS = 3000L // If position drops by more than 3s, it's a reset
+
+    // Audio focus tracking
+    private var audioFocusChangeCount = 0
+    private var lastAudioFocusChange = 0L
+
+    // Current research state
+    private var currentResearchState = ResearchOverlay.ResearchState()
+    private val activeSignals = mutableListOf<String>()
+
+    // Prefs for research mode toggle
+    private val prefs: SharedPreferences by lazy {
+        getSharedPreferences("derot_prefs", Context.MODE_PRIVATE)
+    }
+    // ==================== END RESEARCH MODE ====================
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         logInfo("Derot service connected")
@@ -123,18 +164,321 @@ class VideoFeedBlockerService : AccessibilityService() {
 
         createNotificationChannel()
         startForegroundNotification()
+
+        // Check if research mode should be enabled
+        researchMode = prefs.getBoolean("research_mode", false)
+        if (researchMode) {
+            startResearchMode()
+        }
+
+        // Set up audio focus listener
+        setupAudioFocusListener()
+
+        // Register broadcast receiver for research mode toggle
+        registerResearchModeReceiver()
     }
+
+    private var researchModeReceiver: BroadcastReceiver? = null
+
+    private fun registerResearchModeReceiver() {
+        researchModeReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == ACTION_TOGGLE_RESEARCH) {
+                    val shouldEnable = prefs.getBoolean("research_mode", false)
+                    if (shouldEnable && !researchMode) {
+                        startResearchMode()
+                    } else if (!shouldEnable && researchMode) {
+                        stopResearchMode()
+                    }
+                }
+            }
+        }
+
+        val filter = IntentFilter(ACTION_TOGGLE_RESEARCH)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(researchModeReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(researchModeReceiver, filter)
+        }
+    }
+
+    // ==================== RESEARCH MODE METHODS ====================
+
+    private fun setupAudioFocusListener() {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+
+        val focusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+            val now = System.currentTimeMillis()
+            audioFocusChangeCount++
+            lastAudioFocusChange = now
+
+            val focusName = when (focusChange) {
+                AudioManager.AUDIOFOCUS_GAIN -> "GAIN"
+                AudioManager.AUDIOFOCUS_LOSS -> "LOSS"
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> "LOSS_TRANSIENT"
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> "LOSS_TRANSIENT_DUCK"
+                else -> "UNKNOWN($focusChange)"
+            }
+
+            researchLog("AUDIO_FOCUS: $focusName (total changes: $audioFocusChangeCount)")
+        }
+
+        // Request and immediately abandon focus just to register the listener
+        // This is a hack but allows us to monitor focus changes
+        audioManager.requestAudioFocus(
+            focusListener,
+            AudioManager.STREAM_MUSIC,
+            AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+        )
+        audioManager.abandonAudioFocus(focusListener)
+    }
+
+    fun startResearchMode() {
+        if (researchOverlay != null) return
+
+        // Check for overlay permission
+        if (!Settings.canDrawOverlays(this)) {
+            logWarn("Research mode: No overlay permission")
+            return
+        }
+
+        researchMode = true
+        prefs.edit().putBoolean("research_mode", true).apply()
+
+        // Create log file
+        val logDir = File(getExternalFilesDir(null), "research_logs")
+        logDir.mkdirs()
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        researchLogFile = File(logDir, "research_$timestamp.log")
+        researchLog("=== RESEARCH SESSION STARTED ===")
+        researchLog("Device: ${android.os.Build.MODEL}")
+        researchLog("Android: ${android.os.Build.VERSION.SDK_INT}")
+
+        // Create and show overlay
+        researchOverlay = ResearchOverlay(this)
+        researchOverlay?.show()
+
+        logInfo("Research mode ENABLED - overlay shown, logging to ${researchLogFile?.absolutePath}")
+    }
+
+    fun stopResearchMode() {
+        researchMode = false
+        prefs.edit().putBoolean("research_mode", false).apply()
+
+        researchLog("=== RESEARCH SESSION ENDED ===")
+
+        researchOverlay?.hide()
+        researchOverlay = null
+        researchLogFile = null
+
+        // Reset tracking
+        mediaPositionResetCount = 0
+        audioFocusChangeCount = 0
+        activeSignals.clear()
+
+        logInfo("Research mode DISABLED")
+    }
+
+    private fun researchLog(message: String) {
+        if (!researchMode) return
+
+        val timestamp = dateFormat.format(Date())
+        val logLine = "[$timestamp] $message"
+
+        // Log to logcat
+        Log.i("DerotResearch", logLine)
+
+        // Log to file
+        try {
+            researchLogFile?.appendText("$logLine\n")
+        } catch (e: Exception) {
+            // Ignore file write errors
+        }
+    }
+
+    private fun updateResearchOverlay() {
+        if (!researchMode || researchOverlay == null) return
+
+        // Determine verdict based on signals
+        val verdict = when {
+            activeSignals.contains("FEED_BLOCKED") -> ResearchOverlay.Verdict.FEED_DETECTED
+            activeSignals.contains("POSITION_RESET") && mediaPositionResetCount >= 2 -> ResearchOverlay.Verdict.FEED_LIKELY
+            activeSignals.contains("MEDIA_PLAYING") -> ResearchOverlay.Verdict.WATCHING
+            currentApp in videoFeedApps -> ResearchOverlay.Verdict.WATCHING
+            else -> ResearchOverlay.Verdict.SAFE
+        }
+
+        currentResearchState = currentResearchState.copy(
+            verdict = verdict,
+            signals = activeSignals.toList()
+        )
+
+        researchOverlay?.update(currentResearchState)
+    }
+
+    /**
+     * Enhanced MediaSession tracking that monitors position resets
+     */
+    private fun trackMediaSession(packageName: String) {
+        if (packageName !in videoFeedApps) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastMediaUpdateTime < 200) return // Rate limit
+        lastMediaUpdateTime = now
+
+        try {
+            val mediaSessionManager = getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
+                ?: return
+
+            val activeSessions: List<MediaController>
+            try {
+                activeSessions = mediaSessionManager.getActiveSessions(
+                    ComponentName(this, MediaListenerService::class.java)
+                )
+            } catch (e: SecurityException) {
+                return
+            }
+
+            for (controller in activeSessions) {
+                if (controller.packageName != packageName) continue
+
+                val playbackState = controller.playbackState
+                val metadata = controller.metadata
+                val position = playbackState?.position ?: 0
+                val duration = metadata?.getLong(android.media.MediaMetadata.METADATA_KEY_DURATION) ?: 0
+                val title = metadata?.getString(android.media.MediaMetadata.METADATA_KEY_TITLE) ?: ""
+                val state = playbackState?.state ?: PlaybackState.STATE_NONE
+
+                val stateName = when (state) {
+                    PlaybackState.STATE_PLAYING -> "PLAYING"
+                    PlaybackState.STATE_PAUSED -> "PAUSED"
+                    PlaybackState.STATE_STOPPED -> "STOPPED"
+                    PlaybackState.STATE_BUFFERING -> "BUFFERING"
+                    else -> "OTHER($state)"
+                }
+
+                // Detect position reset (new video started)
+                val positionDelta = position - lastMediaPosition
+                val isPositionReset = lastMediaPosition > POSITION_RESET_THRESHOLD_MS &&
+                        position < POSITION_RESET_THRESHOLD_MS
+
+                val isTitleChange = title.isNotEmpty() && title != lastMediaTitle && lastMediaTitle.isNotEmpty()
+
+                if (isPositionReset || isTitleChange) {
+                    mediaPositionResetCount++
+
+                    val reason = when {
+                        isPositionReset && isTitleChange -> "POSITION_RESET + TITLE_CHANGE"
+                        isPositionReset -> "POSITION_RESET"
+                        else -> "TITLE_CHANGE"
+                    }
+
+                    researchLog("MEDIA_RESET #$mediaPositionResetCount: $reason")
+                    researchLog("  position: $lastMediaPosition -> $position")
+                    researchLog("  title: '$lastMediaTitle' -> '$title'")
+
+                    if (!activeSignals.contains("POSITION_RESET")) {
+                        activeSignals.add("POSITION_RESET")
+                    }
+                }
+
+                // Update tracking
+                lastMediaPosition = position
+                if (title.isNotEmpty()) lastMediaTitle = title
+
+                // Update research state
+                if (state == PlaybackState.STATE_PLAYING) {
+                    if (!activeSignals.contains("MEDIA_PLAYING")) {
+                        activeSignals.add("MEDIA_PLAYING")
+                    }
+                } else {
+                    activeSignals.remove("MEDIA_PLAYING")
+                }
+
+                currentResearchState = currentResearchState.copy(
+                    mediaState = stateName,
+                    mediaPosition = position,
+                    mediaDuration = duration,
+                    mediaTitle = title,
+                    positionResetCount = mediaPositionResetCount
+                )
+
+                break // Only track first matching session
+            }
+        } catch (e: Exception) {
+            researchLog("MEDIA_ERROR: ${e.message}")
+        }
+    }
+
+    /**
+     * Log comprehensive event data for research
+     */
+    private fun logResearchEvent(event: AccessibilityEvent, packageName: String) {
+        if (!researchMode) return
+
+        val eventTypeName = when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "WINDOW_STATE"
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> "WINDOW_CONTENT"
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> "VIEW_SCROLLED"
+            else -> "OTHER(${event.eventType})"
+        }
+
+        researchLog("EVENT: $eventTypeName from $packageName")
+        researchLog("  className: ${event.className}")
+
+        if (event.contentDescription?.isNotEmpty() == true) {
+            researchLog("  contentDescription: ${event.contentDescription}")
+        }
+        if (event.text.isNotEmpty()) {
+            researchLog("  text: ${event.text}")
+        }
+
+        // Scroll-specific data
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            researchLog("  scroll: x=${event.scrollX} y=${event.scrollY}")
+            researchLog("  scrollDelta: dx=${event.scrollDeltaX} dy=${event.scrollDeltaY}")
+            researchLog("  indices: from=${event.fromIndex} to=${event.toIndex} count=${event.itemCount}")
+        }
+
+        // Check if we can get accessibility tree
+        val root = rootInActiveWindow
+        val hasRoot = root != null
+        if (root != null) {
+            root.recycle()
+        }
+
+        currentResearchState = currentResearchState.copy(
+            accessibilityAvailable = hasRoot
+        )
+    }
+
+    // ==================== END RESEARCH MODE METHODS ====================
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         val packageName = event.packageName?.toString() ?: return
         if (isSystemPackage(packageName)) return
 
+        // Research mode: log all events from target apps
+        if (researchMode && packageName in videoFeedApps) {
+            logResearchEvent(event, packageName)
+            trackMediaSession(packageName)
+        }
+
         // Track app changes and time spent
         if (currentApp != packageName) {
             val previousApp = currentApp
             currentApp = packageName
             logDebug("App changed to: $packageName")
+
+            if (researchMode) {
+                researchLog("APP_CHANGE: $previousApp -> $packageName")
+                // Reset research tracking for new app
+                mediaPositionResetCount = 0
+                lastMediaPosition = 0
+                lastMediaTitle = ""
+                activeSignals.clear()
+            }
 
             // Reset scroll tracking when leaving an app
             scrollCountByApp.remove(previousApp)
@@ -144,10 +488,28 @@ class VideoFeedBlockerService : AccessibilityService() {
             if (packageName in videoFeedApps) {
                 appEntryTime[packageName] = System.currentTimeMillis()
             }
+
+            // Update research state
+            currentResearchState = currentResearchState.copy(
+                appName = packageName,
+                scrollCount = 0,
+                positionResetCount = 0
+            )
         }
 
-        // Check time in app for Twitter (fallback detection)
-        if (packageName == "com.twitter.android" || packageName == "com.twitter.android.lite") {
+        // Track current activity via UsageStats
+        if (packageName in videoFeedApps) {
+            val activityName = getCurrentActivityName(packageName)
+            if (activityName != null && activityName != currentResearchState.activityName) {
+                if (researchMode) {
+                    researchLog("ACTIVITY: $activityName")
+                }
+                currentResearchState = currentResearchState.copy(activityName = activityName)
+            }
+        }
+
+        // Check time in app for Twitter (fallback detection) - DISABLED in research mode
+        if (!researchMode && (packageName == "com.twitter.android" || packageName == "com.twitter.android.lite")) {
             checkTimeInTwitter(packageName)
         }
 
@@ -156,16 +518,23 @@ class VideoFeedBlockerService : AccessibilityService() {
             handleScrollEvent(event, packageName)
         }
 
-        // Check for video feeds on any window change
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+        // Check for video feeds on any window change - DISABLED in research mode
+        if (!researchMode) {
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
 
-            // Special handling for Twitter - try event-based detection first
-            if (packageName == "com.twitter.android" || packageName == "com.twitter.android.lite") {
-                checkTwitterVideoFeedFromEvent(event, packageName)
+                // Special handling for Twitter - try event-based detection first
+                if (packageName == "com.twitter.android" || packageName == "com.twitter.android.lite") {
+                    checkTwitterVideoFeedFromEvent(event, packageName)
+                }
+
+                checkAndBlockVideoFeed(packageName)
             }
+        }
 
-            checkAndBlockVideoFeed(packageName)
+        // Update research overlay
+        if (researchMode) {
+            updateResearchOverlay()
         }
     }
 
@@ -174,8 +543,10 @@ class VideoFeedBlockerService : AccessibilityService() {
      * If user scrolls many times in a short period, they're likely browsing a feed.
      */
     private fun handleScrollEvent(event: AccessibilityEvent, packageName: String) {
-        // Only track scrolls for Twitter (which blocks accessibility)
-        if (packageName != "com.twitter.android" && packageName != "com.twitter.android.lite") {
+        // In research mode, track all scrolls from target apps
+        val isTargetApp = packageName == "com.twitter.android" || packageName == "com.twitter.android.lite"
+
+        if (!isTargetApp && !researchMode) {
             return
         }
 
@@ -189,14 +560,34 @@ class VideoFeedBlockerService : AccessibilityService() {
 
         // Check if this looks like a vertical scroll (feed browsing)
         val scrollY = event.scrollY
-        val isVerticalScroll = event.scrollDeltaY != 0 || scrollY > 0
+        val scrollDeltaY = event.scrollDeltaY
+        val isVerticalScroll = scrollDeltaY != 0 || scrollY > 0
 
-        // Debug: log scroll events from Twitter
+        // Research mode: log ALL scroll events
+        if (researchMode && packageName in videoFeedApps) {
+            researchLog("SCROLL: dy=$scrollDeltaY y=$scrollY class=${event.className}")
+            researchLog("  indices: from=${event.fromIndex} to=${event.toIndex} count=${event.itemCount}")
+
+            // Detect full-page snap (typical of video feeds)
+            // If scrollDeltaY is close to screen height, it's likely a page snap
+            val displayMetrics = resources.displayMetrics
+            val screenHeight = displayMetrics.heightPixels
+            val isFullPageSnap = Math.abs(scrollDeltaY) > screenHeight * 0.7
+
+            if (isFullPageSnap) {
+                researchLog("  >>> FULL PAGE SNAP DETECTED (dy=$scrollDeltaY, screenH=$screenHeight)")
+                if (!activeSignals.contains("PAGE_SNAP")) {
+                    activeSignals.add("PAGE_SNAP")
+                }
+            }
+        }
+
+        // Debug: log scroll events from Twitter (first time only)
         if (!dumpedApps.contains("scroll_debug_$packageName")) {
             dumpedApps.add("scroll_debug_$packageName")
             logInfo("=== TWITTER SCROLL EVENT ===")
             logInfo("  scrollX=${event.scrollX}, scrollY=$scrollY")
-            logInfo("  scrollDeltaX=${event.scrollDeltaX}, scrollDeltaY=${event.scrollDeltaY}")
+            logInfo("  scrollDeltaX=${event.scrollDeltaX}, scrollDeltaY=$scrollDeltaY")
             logInfo("  fromIndex=${event.fromIndex}, toIndex=${event.toIndex}")
             logInfo("  className=${event.className}")
         }
@@ -218,8 +609,11 @@ class VideoFeedBlockerService : AccessibilityService() {
             scrollCountByApp[packageName] = count
             logDebug("Twitter: Scroll count=$count (threshold=$SCROLL_THRESHOLD_FOR_FEED)")
 
-            // Threshold reached - user is scrolling through feed
-            if (count >= SCROLL_THRESHOLD_FOR_FEED) {
+            // Update research state
+            currentResearchState = currentResearchState.copy(scrollCount = count)
+
+            // Threshold reached - user is scrolling through feed (but not in research mode)
+            if (!researchMode && count >= SCROLL_THRESHOLD_FOR_FEED) {
                 logInfo("Twitter: Detected feed browsing via scroll count ($count scrolls)")
                 blockVideoFeed(packageName)
 
@@ -994,6 +1388,21 @@ class VideoFeedBlockerService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+
+        // Clean up research mode
+        if (researchMode) {
+            stopResearchMode()
+        }
+
+        // Unregister receiver
+        researchModeReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
+
         logInfo("Service destroyed")
     }
 }
