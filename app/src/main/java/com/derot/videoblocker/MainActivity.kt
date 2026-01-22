@@ -5,6 +5,8 @@ import android.app.AppOpsManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Bundle
 import android.os.Process
 import android.provider.Settings
@@ -12,6 +14,7 @@ import android.view.accessibility.AccessibilityManager
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -27,6 +30,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var settingsButton: Button
     private lateinit var usageButton: Button
     private lateinit var notificationButton: Button
+    private lateinit var overlayButton: Button
+    private lateinit var researchButton: Button
+
+    private val prefs: SharedPreferences by lazy {
+        getSharedPreferences("derot_prefs", Context.MODE_PRIVATE)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -37,6 +46,8 @@ class MainActivity : AppCompatActivity() {
         settingsButton = findViewById(R.id.btn_open_settings)
         usageButton = findViewById(R.id.btn_usage_access)
         notificationButton = findViewById(R.id.btn_notification_access)
+        overlayButton = findViewById(R.id.btn_overlay_permission)
+        researchButton = findViewById(R.id.btn_research_mode)
 
         settingsButton.setOnClickListener {
             openAccessibilitySettings()
@@ -48,6 +59,14 @@ class MainActivity : AppCompatActivity() {
 
         notificationButton.setOnClickListener {
             openNotificationListenerSettings()
+        }
+
+        overlayButton.setOnClickListener {
+            openOverlaySettings()
+        }
+
+        researchButton.setOnClickListener {
+            toggleResearchMode()
         }
 
         updateStatus()
@@ -97,6 +116,27 @@ class MainActivity : AppCompatActivity() {
             notificationButton.text = "Grant Notification Access (for media detection)"
             notificationButton.isEnabled = true
         }
+
+        // Update overlay permission button
+        val overlayEnabled = isOverlayPermissionGranted()
+        if (overlayEnabled) {
+            overlayButton.text = "✓ Overlay permission granted"
+            overlayButton.isEnabled = false
+        } else {
+            overlayButton.text = "Grant Overlay Permission (for research mode)"
+            overlayButton.isEnabled = true
+        }
+
+        // Update research mode button
+        val researchEnabled = isResearchModeEnabled()
+        if (researchEnabled) {
+            researchButton.text = "RESEARCH MODE: ON (tap to disable)"
+            researchButton.setBackgroundColor(ContextCompat.getColor(this, R.color.secondary))
+        } else {
+            researchButton.text = "Start Research Mode"
+            researchButton.setBackgroundColor(ContextCompat.getColor(this, R.color.primary))
+        }
+        researchButton.isEnabled = accessibilityEnabled
     }
 
     private fun isNotificationListenerEnabled(): Boolean {
@@ -139,5 +179,56 @@ class MainActivity : AppCompatActivity() {
     private fun openAccessibilitySettings() {
         val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
         startActivity(intent)
+    }
+
+    private fun isOverlayPermissionGranted(): Boolean {
+        return Settings.canDrawOverlays(this)
+    }
+
+    private fun openOverlaySettings() {
+        val intent = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:$packageName")
+        )
+        startActivity(intent)
+    }
+
+    private fun isResearchModeEnabled(): Boolean {
+        return prefs.getBoolean("research_mode", false)
+    }
+
+    private fun toggleResearchMode() {
+        if (!isAccessibilityServiceEnabled()) {
+            Toast.makeText(this, "Enable Accessibility Service first", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (!isOverlayPermissionGranted()) {
+            Toast.makeText(this, "Grant Overlay permission first", Toast.LENGTH_SHORT).show()
+            openOverlaySettings()
+            return
+        }
+
+        val currentState = isResearchModeEnabled()
+        val newState = !currentState
+
+        // Save state
+        prefs.edit().putBoolean("research_mode", newState).apply()
+
+        // Notify service via broadcast
+        val intent = Intent(VideoFeedBlockerService.ACTION_TOGGLE_RESEARCH).apply {
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
+
+        // Update UI
+        updateStatus()
+
+        val message = if (newState) {
+            "Research mode ENABLED - open X to see overlay"
+        } else {
+            "Research mode DISABLED"
+        }
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 }
